@@ -23,11 +23,14 @@ import (
 
 // Client represents a Perplexity API client
 type Client struct {
-	sessionToken string
-	client       *req.Client
-	Model        string
-	Attachments  []string
-	OpenSerch    bool
+	sessionToken    string
+	client          *req.Client
+	Model           string
+	Attachments     []string
+	OpenSerch       bool
+	BackendUUID     string
+	ReadWriteToken  string
+	ImageGenPending bool
 }
 
 // Perplexity API structures
@@ -65,9 +68,32 @@ type PerplexityParams struct {
 
 // Response structures
 type PerplexityResponse struct {
-	Blocks       []Block `json:"blocks"`
-	Status       string  `json:"status"`
-	DisplayModel string  `json:"display_model"`
+	Blocks         []Block `json:"blocks"`
+	Status         string  `json:"status"`
+	DisplayModel   string  `json:"display_model"`
+	BackendUUID    string  `json:"backend_uuid"`
+	QueryStr       string  `json:"query_str"`
+	ReadWriteToken string  `json:"read_write_token"`
+	AnswerModes    []AnswerMode `json:"answer_modes"`
+	Extras         *Extras `json:"_extras"`
+}
+
+type AnswerMode struct {
+	AnswerModeType string `json:"answer_mode_type"`
+	HasPreview     bool   `json:"has_preview"`
+}
+
+type Extras struct {
+	Next            string `json:"next"`
+	ResumeEntryUUID string `json:"resume_entry_uuid"`
+	Cursor          string `json:"cursor"`
+	ImageGenRequest *ImageGenRequest `json:"image_gen_request"`
+}
+
+type ImageGenRequest struct {
+	Model          string `json:"model"`
+	Prompt         string `json:"prompt"`
+	ImageGenTaskID string `json:"image_gen_task_id"`
 }
 
 type Block struct {
@@ -115,7 +141,7 @@ type ImageModeBlock struct {
 
 // NewClient creates a new Perplexity API client
 func NewClient(sessionToken string, proxy string, model string, openSerch bool) *Client {
-	client := req.C().SetTimeout(time.Minute * 10)
+	client := req.C().ImpersonateChrome().SetTimeout(time.Minute * 10)
 	client.Transport.SetResponseHeaderTimeout(time.Second * 10)
 	if proxy != "" {
 		client.SetProxyURL(proxy)
@@ -159,6 +185,11 @@ func NewClient(sessionToken string, proxy string, model string, openSerch bool) 
 
 // SendMessage sends a message to Perplexity and returns the status and response
 func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc *gin.Context) (int, error) {
+	isImageModel := config.IsImageModel(c.Model)
+	modelPreference := c.Model
+	if isImageModel {
+		modelPreference = config.ImageModelMap[c.Model]
+	}
 	// Create request body
 	requestBody := PerplexityRequest{
 		Params: PerplexityParams{
@@ -170,7 +201,7 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 			SearchRecencyFilter:     nil,
 			FrontendUUID:            uuid.New().String(),
 			Mode:                    "copilot",
-			ModelPreference:         c.Model,
+			ModelPreference:         modelPreference,
 			IsRelatedQuery:          false,
 			IsSponsored:             false,
 			VisitorID:               uuid.New().String(),
@@ -202,11 +233,10 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 		},
 		QueryStr: message,
 	}
-	if c.OpenSerch {
+	if c.OpenSerch && !isImageModel {
 		requestBody.Params.SearchFocus = "internet"
 		requestBody.Params.Sources = append(requestBody.Params.Sources, "web")
 	}
-	logger.Info(fmt.Sprintf("Perplexity request body: %v", requestBody))
 	// Make the request
 	resp, err := c.client.R().DisableAutoReadResponse().
 		SetBody(requestBody).
@@ -234,6 +264,11 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 }
 
 func (c *Client) SendMessageCollect(message string, is_incognito bool) (string, error) {
+	isImageModel := config.IsImageModel(c.Model)
+	modelPreference := c.Model
+	if isImageModel {
+		modelPreference = config.ImageModelMap[c.Model]
+	}
 	requestBody := PerplexityRequest{
 		Params: PerplexityParams{
 			Attachments: c.Attachments,
@@ -244,7 +279,7 @@ func (c *Client) SendMessageCollect(message string, is_incognito bool) (string, 
 			SearchRecencyFilter:     nil,
 			FrontendUUID:            uuid.New().String(),
 			Mode:                    "copilot",
-			ModelPreference:         c.Model,
+			ModelPreference:         modelPreference,
 			IsRelatedQuery:          false,
 			IsSponsored:             false,
 			VisitorID:               uuid.New().String(),
@@ -276,7 +311,7 @@ func (c *Client) SendMessageCollect(message string, is_incognito bool) (string, 
 		},
 		QueryStr: message,
 	}
-	if c.OpenSerch {
+	if c.OpenSerch && !isImageModel {
 		requestBody.Params.SearchFocus = "internet"
 		requestBody.Params.Sources = append(requestBody.Params.Sources, "web")
 	}
@@ -408,7 +443,6 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 			break
 		}
 		line = strings.TrimRight(line, "\r\n")
-		// Skip empty lines
 		if line == "" {
 			continue
 		}
@@ -416,14 +450,85 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 			continue
 		}
 		data := line[6:]
+		// Debug: log completion/error events
+		if strings.Contains(data, "COMPLETED") || (strings.Contains(data, "failed") && strings.Contains(data, "error_code")) {
+			logger.Info(fmt.Sprintf("COMPLETED/FAILED event: %s", data))
+		}
 		var response PerplexityResponse
 		if err := json.Unmarshal([]byte(data), &response); err != nil {
 			logger.Error(fmt.Sprintf("Error parsing JSON: %v", err))
 			continue
 		}
-		// Check for completion and web results
+
+		// Track backend_uuid, read_write_token, and image intent
+		if response.BackendUUID != "" {
+			c.BackendUUID = response.BackendUUID
+		}
+		if response.ReadWriteToken != "" {
+			c.ReadWriteToken = response.ReadWriteToken
+		}
+		for _, am := range response.AnswerModes {
+			if am.AnswerModeType == "IMAGE" {
+				c.ImageGenPending = true
+			}
+		}
+		// Track state silently
+
+		// Process text blocks from ALL events (including COMPLETED)
+		for _, block := range response.Blocks {
+			if block.ReasoningPlanBlock != nil && len(block.ReasoningPlanBlock.Goals) > 0 {
+				res_text := ""
+				if !inThinking && !thinkShown {
+					res_text += "<think>"
+					inThinking = true
+				}
+				for _, goal := range block.ReasoningPlanBlock.Goals {
+					if goal.Description != "" && goal.Description != "Beginning analysis" && goal.Description != "Wrapping up analysis" {
+						res_text += goal.Description
+					}
+				}
+				full_text += res_text
+				if !stream {
+					continue
+				}
+				model.ReturnOpenAIResponse(res_text, stream, gc)
+			}
+		}
+		for _, block := range response.Blocks {
+			if block.MarkdownBlock != nil && len(block.MarkdownBlock.Chunks) > 0 && block.IntendedUsage == "ask_text_0_markdown" {
+				res_text := ""
+				if inThinking {
+					res_text += "</think>\n\n"
+					inThinking = false
+					thinkShown = true
+				}
+				for _, chunk := range block.MarkdownBlock.Chunks {
+					if chunk != "" {
+						res_text += chunk
+					}
+				}
+				full_text += res_text
+				if !stream {
+					continue
+				}
+				model.ReturnOpenAIResponse(res_text, stream, gc)
+			}
+		}
+
+		// Check for COMPLETED status
 		if response.Status == "COMPLETED" {
 			final = true
+			for _, b := range response.Blocks {
+				if b.ImageModeBlock != nil {
+					logger.Info(fmt.Sprintf("ImageModeBlock found: Progress=%s, Items=%d, Type=%s", b.ImageModeBlock.Progress, len(b.ImageModeBlock.MediaItems), b.ImageModeBlock.AnswerModeType))
+				}
+				if b.MarkdownBlock != nil {
+					logger.Info(fmt.Sprintf("MarkdownBlock found: intended_usage=%s, chunks=%d", b.IntendedUsage, len(b.MarkdownBlock.Chunks)))
+				}
+				if b.WebResultBlock != nil {
+					logger.Info(fmt.Sprintf("WebResultBlock found: results=%d", len(b.WebResultBlock.WebResults)))
+				}
+			}
 			for _, block := range response.Blocks {
 				if block.ImageModeBlock != nil && block.ImageModeBlock.Progress == "DONE" && len(block.ImageModeBlock.MediaItems) > 0 {
 					imageResultsText := ""
@@ -470,49 +575,6 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 		}
 		if final {
 			break
-		}
-		// Process each block in the response
-		for _, block := range response.Blocks {
-			// Handle reasoning plan blocks (thinking)
-			if block.ReasoningPlanBlock != nil && len(block.ReasoningPlanBlock.Goals) > 0 {
-
-				res_text := ""
-				if !inThinking && !thinkShown {
-					res_text += "<think>"
-					inThinking = true
-				}
-
-				for _, goal := range block.ReasoningPlanBlock.Goals {
-					if goal.Description != "" && goal.Description != "Beginning analysis" && goal.Description != "Wrapping up analysis" {
-						res_text += goal.Description
-					}
-				}
-				full_text += res_text
-				if !stream {
-					continue
-				}
-				model.ReturnOpenAIResponse(res_text, stream, gc)
-			}
-		}
-		for _, block := range response.Blocks {
-			if block.MarkdownBlock != nil && len(block.MarkdownBlock.Chunks) > 0 && block.IntendedUsage == "ask_text_0_markdown" {
-				res_text := ""
-				if inThinking {
-					res_text += "</think>\n\n"
-					inThinking = false
-					thinkShown = true
-				}
-				for _, chunk := range block.MarkdownBlock.Chunks {
-					if chunk != "" {
-						res_text += chunk
-					}
-				}
-				full_text += res_text
-				if !stream {
-					continue
-				}
-				model.ReturnOpenAIResponse(res_text, stream, gc)
-			}
 		}
 
 	}
