@@ -6,6 +6,7 @@ import (
 	"pplx2api/config"
 	"pplx2api/core"
 	"pplx2api/logger"
+	"pplx2api/model"
 	"pplx2api/utils"
 	"strings"
 
@@ -23,17 +24,11 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-// HealthCheckHandler handles the health check endpoint
 func HealthCheckHandler(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"status": "ok",
-	})
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-// ChatCompletionsHandler handles the chat completions endpoint
 func ChatCompletionsHandler(c *gin.Context) {
-
-	// Parse request body
 	var req ChatCompletionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, ErrorResponse{
@@ -41,8 +36,6 @@ func ChatCompletionsHandler(c *gin.Context) {
 		})
 		return
 	}
-	// logger.Info(fmt.Sprintf("Received request: %v", req))
-	// Validate request
 	if len(req.Messages) == 0 {
 		c.JSON(http.StatusBadRequest, ErrorResponse{
 			Error: "No messages provided",
@@ -50,36 +43,92 @@ func ChatCompletionsHandler(c *gin.Context) {
 		return
 	}
 
-	// Get model or use default
-	model := req.Model
-	if model == "" {
-		model = "claude-3.7-sonnet"
+	m := req.Model
+	if m == "" {
+		m = "claude-3.7-sonnet"
+	}
+	// Strip provider prefix (e.g. "pplx2api/claude-4-6-sonnet" -> "claude-4-6-sonnet")
+	if idx := strings.LastIndex(m, "/"); idx >= 0 {
+		m = m[idx+1:]
 	}
 	openSearch := false
-	if strings.HasSuffix(model, "-search") {
+	if strings.HasSuffix(m, "-search") {
 		openSearch = true
-		model = strings.TrimSuffix(model, "-search")
+		m = strings.TrimSuffix(m, "-search")
 	}
-	model = config.ModelMapGet(model, model) // 获取模型名称
+	m = config.ModelMapGet(m, m)
+
+	hasTools := len(req.Tools) > 0
+	hasToolResults := core.HasToolRoleMessages(req.Messages)
+
+	// Build the base prompt from messages (for R2+ or normal flow)
 	var prompt strings.Builder
 	img_data_list := []string{}
-	// Format messages into a single prompt
+	toolDefs := core.ConvertTools(req.Tools)
+
 	for _, msg := range req.Messages {
 		role, roleOk := msg["role"].(string)
 		if !roleOk {
-			continue // 忽略无效格式
+			continue
 		}
 
+		if role == "system" {
+			content, _ := msg["content"].(string)
+			prompt.WriteString("System: ")
+			prompt.WriteString(content)
+			prompt.WriteString("\n\n")
+			continue
+		}
+
+		if role == "tool" {
+			toolCallID := core.ExtractToolCallID(msg)
+			content, _ := msg["content"].(string)
+			prompt.WriteString(fmt.Sprintf("Tool Result (ID: %s):\n%s\n\n", toolCallID, content))
+			continue
+		}
+
+		if role == "assistant" {
+			if toolCalls, hasTC := msg["tool_calls"]; hasTC && toolCalls != nil {
+				tcList, ok := toolCalls.([]interface{})
+				if ok && len(tcList) > 0 {
+					prompt.WriteString("Assistant: [Called tool")
+					for _, tc := range tcList {
+						tcMap, ok := tc.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						funcMap, ok := tcMap["function"].(map[string]interface{})
+						if !ok {
+							continue
+						}
+						name, _ := funcMap["name"].(string)
+						args, _ := funcMap["arguments"].(string)
+						prompt.WriteString(fmt.Sprintf(": %s(%s)", name, args))
+					}
+					prompt.WriteString("]\n\n")
+				}
+			} else {
+				prompt.WriteString(utils.GetRolePrefix(role))
+				if content, exists := msg["content"]; exists {
+					switch v := content.(type) {
+					case string:
+						prompt.WriteString(v)
+					}
+				}
+				prompt.WriteString("\n\n")
+			}
+			continue
+		}
+
+		prompt.WriteString(utils.GetRolePrefix(role))
 		content, exists := msg["content"]
 		if !exists {
 			continue
 		}
-
-		prompt.WriteString(utils.GetRolePrefix(role)) // 获取角色前缀
 		switch v := content.(type) {
-		case string: // 如果 content 直接是 string
+		case string:
 			prompt.WriteString(v + "\n\n")
-		case []interface{}: // 如果 content 是 []interface{} 类型的数组
+		case []interface{}:
 			for _, item := range v {
 				if itemMap, ok := item.(map[string]interface{}); ok {
 					if itemType, ok := itemMap["type"].(string); ok {
@@ -94,10 +143,9 @@ func ChatCompletionsHandler(c *gin.Context) {
 										logger.Info(fmt.Sprintf("Image URL: %s ……", url[:50]))
 									}
 									if strings.HasPrefix(url, "data:image/") {
-										// 保留 base64 编码的图片数据
 										url = strings.Split(url, ",")[1]
 									}
-									img_data_list = append(img_data_list, url) // 收集图片数据
+									img_data_list = append(img_data_list, url)
 								}
 							}
 						}
@@ -106,11 +154,17 @@ func ChatCompletionsHandler(c *gin.Context) {
 			}
 		}
 	}
-	fmt.Println(prompt.String())                             // 输出最终构造的内容
-	fmt.Println("img_data_list_length:", len(img_data_list)) // 输出图片数据列表长度
+	if !hasToolResults {
+		prompt.WriteString("Assistant: ")
+	} else {
+		prompt.WriteString("\n(Based on the tool results above, provide a final answer)\nAssistant: ")
+	}
+
+	fmt.Println("Prompt:", prompt.String())
+	fmt.Println("img_data_list_length:", len(img_data_list))
 	var rootPrompt strings.Builder
 	rootPrompt.WriteString(prompt.String())
-	// 切号重试机制
+
 	var pplxClient *core.Client
 	index := config.Sr.NextIndex()
 	for i := 0; i < config.ConfigInstance.RetryCount; i++ {
@@ -120,20 +174,18 @@ func ChatCompletionsHandler(c *gin.Context) {
 		}
 		index = (index + 1) % len(config.ConfigInstance.Sessions)
 		session, err := config.ConfigInstance.GetSessionForModel(index)
-		logger.Info(fmt.Sprintf("Using session for model %s: %s", model, session.SessionKey))
+		logger.Info(fmt.Sprintf("Using session for model %s: %s", m, session.SessionKey))
 		if err != nil {
-			logger.Error(fmt.Sprintf("Failed to get session for model %s: %v", model, err))
+			logger.Error(fmt.Sprintf("Failed to get session for model %s: %v", m, err))
 			logger.Info("Retrying another session")
 			continue
 		}
-		// Initialize the Claude client
-		pplxClient = core.NewClient(session.SessionKey, config.ConfigInstance.Proxy, model, openSearch)
+		pplxClient = core.NewClient(session.SessionKey, config.ConfigInstance.Proxy, m, openSearch)
 		if len(img_data_list) > 0 {
 			err := pplxClient.UploadImage(img_data_list)
 			if err != nil {
 				logger.Error(fmt.Sprintf("Failed to upload file: %v", err))
 				logger.Info("Retrying another session")
-
 				continue
 			}
 		}
@@ -142,21 +194,51 @@ func ChatCompletionsHandler(c *gin.Context) {
 			if err != nil {
 				logger.Error(fmt.Sprintf("Failed to upload text: %v", err))
 				logger.Info("Retrying another session")
-
 				continue
 			}
 			prompt.Reset()
 			prompt.WriteString(config.ConfigInstance.PromptForFile)
 		}
-		if _, err := pplxClient.SendMessage(prompt.String(), req.Stream, config.ConfigInstance.IsIncognito, c); err != nil {
-			logger.Error(fmt.Sprintf("Failed to send message: %v", err))
-			logger.Info("Retrying another session")
 
-			continue // Retry on error
+		if hasTools && !hasToolResults {
+			userMsg := core.GetLastUserMessage(req.Messages)
+			toolCall, err := pplxClient.DetermineToolCall(userMsg, toolDefs)
+			if err != nil {
+				logger.Error(fmt.Sprintf("Tool determination failed: %v, falling back to normal answer", err))
+				if _, err := pplxClient.SendMessage(prompt.String(), req.Stream, config.ConfigInstance.IsIncognito, c); err != nil {
+					logger.Error(fmt.Sprintf("Failed to send message: %v", err))
+					logger.Info("Retrying another session")
+					continue
+				}
+				return
+			}
+			if toolCall != nil {
+				logger.Info(fmt.Sprintf("Tool call determined: %s(%s)", toolCall.Function.Name, toolCall.Function.Arguments))
+				model.ReturnToolCallResponse(toolCall.ID, toolCall.Function.Name, toolCall.Function.Arguments, req.Stream, c)
+			} else {
+				logger.Info("No tool needed, answering directly")
+				if _, err := pplxClient.SendMessage(prompt.String(), req.Stream, config.ConfigInstance.IsIncognito, c); err != nil {
+					logger.Error(fmt.Sprintf("Failed to send message: %v", err))
+					logger.Info("Retrying another session")
+					continue
+				}
+			}
+		} else if hasTools && hasToolResults {
+			text, err := pplxClient.SendMessageCollect(prompt.String(), config.ConfigInstance.IsIncognito)
+			if err != nil {
+				logger.Error(fmt.Sprintf("Failed to send tool result message: %v", err))
+				logger.Info("Retrying another session")
+				continue
+			}
+			model.ReturnOpenAIResponse(text, req.Stream, c)
+		} else {
+			if _, err := pplxClient.SendMessage(prompt.String(), req.Stream, config.ConfigInstance.IsIncognito, c); err != nil {
+				logger.Error(fmt.Sprintf("Failed to send message: %v", err))
+				logger.Info("Retrying another session")
+				continue
+			}
 		}
-
 		return
-
 	}
 	logger.Error("Failed for all retries")
 	c.JSON(http.StatusInternalServerError, ErrorResponse{

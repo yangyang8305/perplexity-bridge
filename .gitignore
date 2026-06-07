@@ -1,0 +1,6 @@
+pplx2api.exe
+.env
+sessions.json
+*.log
+.DS_Store
+Thumbs.db

@@ -115,7 +115,7 @@ type ImageModeBlock struct {
 
 // NewClient creates a new Perplexity API client
 func NewClient(sessionToken string, proxy string, model string, openSerch bool) *Client {
-	client := req.C().ImpersonateChrome().SetTimeout(time.Minute * 10)
+	client := req.C().SetTimeout(time.Minute * 10)
 	client.Transport.SetResponseHeaderTimeout(time.Second * 10)
 	if proxy != "" {
 		client.SetProxyURL(proxy)
@@ -123,7 +123,9 @@ func NewClient(sessionToken string, proxy string, model string, openSerch bool) 
 
 	// Set common headers
 	headers := map[string]string{
+		"accept":          "text/event-stream, text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 		"accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7,zh-TW;q=0.6",
+		"accept-encoding": "gzip, deflate",
 		"cache-control":   "no-cache",
 		"origin":          "https://www.perplexity.ai",
 		"pragma":          "no-cache",
@@ -165,8 +167,6 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 			Timezone:    "America/New_York",
 			SearchFocus: "writing",
 			Sources:     []string{},
-			// SearchFocus:             "internet",
-			// Sources:                 []string{"web"},
 			SearchRecencyFilter:     nil,
 			FrontendUUID:            uuid.New().String(),
 			Mode:                    "copilot",
@@ -233,6 +233,147 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 	return 200, c.HandleResponse(resp.Body, stream, gc)
 }
 
+func (c *Client) SendMessageCollect(message string, is_incognito bool) (string, error) {
+	requestBody := PerplexityRequest{
+		Params: PerplexityParams{
+			Attachments: c.Attachments,
+			Language:    "en-US",
+			Timezone:    "America/New_York",
+			SearchFocus: "writing",
+			Sources:     []string{},
+			SearchRecencyFilter:     nil,
+			FrontendUUID:            uuid.New().String(),
+			Mode:                    "copilot",
+			ModelPreference:         c.Model,
+			IsRelatedQuery:          false,
+			IsSponsored:             false,
+			VisitorID:               uuid.New().String(),
+			UserNextauthID:          uuid.New().String(),
+			FrontendContextUUID:     uuid.New().String(),
+			PromptSource:            "user",
+			QuerySource:             "home",
+			BrowserHistorySummary:   []interface{}{},
+			IsIncognito:             is_incognito,
+			UseSchematizedAPI:       true,
+			SendBackTextInStreaming: false,
+			SupportedBlockUseCases: []string{
+				"answer_modes",
+				"media_items",
+				"knowledge_cards",
+				"inline_entity_cards",
+				"place_widgets",
+				"finance_widgets",
+				"sports_widgets",
+				"shopping_widgets",
+				"jobs_widgets",
+				"search_result_widgets",
+				"entity_list_answer",
+				"todo_list",
+			},
+			ClientCoordinates:        nil,
+			IsNavSuggestionsDisabled: false,
+			Version:                  "2.18",
+		},
+		QueryStr: message,
+	}
+	if c.OpenSerch {
+		requestBody.Params.SearchFocus = "internet"
+		requestBody.Params.Sources = append(requestBody.Params.Sources, "web")
+	}
+	resp, err := c.client.R().DisableAutoReadResponse().
+		SetBody(requestBody).
+		Post("https://www.perplexity.ai/rest/sse/perplexity_ask")
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return "", fmt.Errorf("rate limit exceeded")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+	text, err := c.collectResponse(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return text, nil
+}
+
+func (c *Client) DetermineToolCall(userMessage string, tools []ToolDefinition) (*ToolCallInfo, error) {
+	prompt := BuildToolSelectionPrompt(userMessage, tools)
+	text, err := c.SendMessageCollect(prompt, true)
+	if err != nil {
+		return nil, err
+	}
+	tc := ParseToolSelectionJSON(text)
+	if tc == nil {
+		return nil, nil
+	}
+	return tc, nil
+}
+
+func (c *Client) collectResponse(body io.ReadCloser) (string, error) {
+	defer body.Close()
+	reader := bufio.NewReaderSize(body, 1024*1024)
+	full_text := ""
+	inThinking := false
+	thinkShown := false
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return "", err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" || !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := line[6:]
+		var response PerplexityResponse
+		if err := json.Unmarshal([]byte(data), &response); err != nil {
+			continue
+		}
+		if response.Status == "COMPLETED" {
+			break
+		}
+		for _, block := range response.Blocks {
+			if block.ReasoningPlanBlock != nil && len(block.ReasoningPlanBlock.Goals) > 0 {
+				res_text := ""
+				if !inThinking && !thinkShown {
+					res_text += "<think>"
+					inThinking = true
+				}
+				for _, goal := range block.ReasoningPlanBlock.Goals {
+					if goal.Description != "" && goal.Description != "Beginning analysis" && goal.Description != "Wrapping up analysis" {
+						res_text += goal.Description
+					}
+				}
+				full_text += res_text
+			}
+		}
+		for _, block := range response.Blocks {
+			if block.MarkdownBlock != nil && len(block.MarkdownBlock.Chunks) > 0 && block.IntendedUsage == "ask_text_0_markdown" {
+				res_text := ""
+				if inThinking {
+					res_text += "</think>\n\n"
+					inThinking = false
+					thinkShown = true
+				}
+				for _, chunk := range block.MarkdownBlock.Chunks {
+					if chunk != "" {
+						res_text += chunk
+					}
+				}
+				full_text += res_text
+			}
+		}
+	}
+	return full_text, nil
+}
+
 func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context) error {
 	defer body.Close()
 	// Set headers for streaming
@@ -243,15 +384,14 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 		gc.Writer.WriteHeader(http.StatusOK)
 		gc.Writer.Flush()
 	}
-	scanner := bufio.NewScanner(body)
+	// Use bufio.Reader instead of bufio.Scanner for better UTF-8 handling
+	reader := bufio.NewReaderSize(body, 1024*1024)
 	clientDone := gc.Request.Context().Done()
-	// 增大缓冲区大小
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	full_text := ""
 	inThinking := false
 	thinkShown := false
 	final := false
-	for scanner.Scan() {
+	for {
 		select {
 		case <-clientDone:
 			logger.Info("Client connection closed")
@@ -259,7 +399,15 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 		default:
 		}
 
-		line := scanner.Text()
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			logger.Error(fmt.Sprintf("Error reading line: %v", err))
+			break
+		}
+		line = strings.TrimRight(line, "\r\n")
 		// Skip empty lines
 		if line == "" {
 			continue
@@ -268,7 +416,6 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 			continue
 		}
 		data := line[6:]
-		// logger.Info(fmt.Sprintf("Received data: %s", data))
 		var response PerplexityResponse
 		if err := json.Unmarshal([]byte(data), &response); err != nil {
 			logger.Error(fmt.Sprintf("Error parsing JSON: %v", err))
@@ -370,10 +517,6 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 
 	}
 
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading response: %w", err)
-	}
-
 	if !stream {
 		model.ReturnOpenAIResponse(full_text, stream, gc)
 	} else {
@@ -471,34 +614,21 @@ func (c *Client) UploadImage(img_list []string) error {
 }
 
 func (c *Client) UloadFileToCloudinary(uploadInfo CloudinaryUploadInfo, contentType string, filedata string, filename string) error {
-	// 更新为 AWS S3 上传
 	if len(filedata) > 100 {
 		logger.Info(fmt.Sprintf("filedata: %s ……", filedata[:50]))
 	}
-	// Add form fields
 	logger.Info(fmt.Sprintf("Uploading file %s to Cloudinary", filename))
 	var formFields map[string]string
 	if contentType == "img" {
 		formFields = map[string]string{
-			// "timestamp": fmt.Sprintf("%d", uploadInfo.Timestamp),
-			// "unique_filename":      uploadInfo.UniqueFilename,
-			// "folder":               uploadInfo.Folder,
-			// "use_filename":         uploadInfo.UseFilename,
-			// "public_id":            uploadInfo.PublicID,
-			// "transformation":       uploadInfo.Transformation,
-			// "moderation":           uploadInfo.Moderation,
-			// "resource_type":        uploadInfo.ResourceType,
-			// "api_key":              uploadInfo.APIKey,
-			// "cloud_name":           uploadInfo.CloudName,
-			"signature": uploadInfo.Signature,
-			// "type":                 "private",
-			"key":                  uploadInfo.Key,
-			"tagging":              uploadInfo.Tagging,
-			"AWSAccessKeyId":       uploadInfo.AWSAccessKeyId,
-			"policy":               uploadInfo.Policy,
-			"x-amz-security-token": uploadInfo.Xamzsecuritytoken,
-			"acl":                  uploadInfo.ACL,
-			"Content-Type":         "image/jpeg", // Assuming image/jpeg for images
+			"signature":             uploadInfo.Signature,
+			"key":                   uploadInfo.Key,
+			"tagging":               uploadInfo.Tagging,
+			"AWSAccessKeyId":        uploadInfo.AWSAccessKeyId,
+			"policy":                uploadInfo.Policy,
+			"x-amz-security-token":  uploadInfo.Xamzsecuritytoken,
+			"acl":                   uploadInfo.ACL,
+			"Content-Type":          "image/jpeg",
 		}
 	} else {
 		formFields = map[string]string{
@@ -521,38 +651,28 @@ func (c *Client) UloadFileToCloudinary(uploadInfo CloudinaryUploadInfo, contentT
 		}
 	}
 
-	// Add the file,filedata 是base64编码的字符串
 	decodedData, err := base64.StdEncoding.DecodeString(filedata)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Error decoding base64 data: %v", err))
 		return err
 	}
 
-	// 创建一个文件部分
-	part, err := writer.CreateFormFile("file", filename) // 替换 filename.ext 为实际文件名
+	part, err := writer.CreateFormFile("file", filename)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Error creating form file: %v", err))
 		return err
 	}
 
-	// 将解码后的数据写入文件部分
 	if _, err := part.Write(decodedData); err != nil {
 		logger.Error(fmt.Sprintf("Error writing file data: %v", err))
 		return err
 	}
-	// Close the writer to finalize the form
 	if err := writer.Close(); err != nil {
 		logger.Error(fmt.Sprintf("Error closing writer: %v", err))
 		return err
 	}
 
-	// Create the upload request
-	// var uploadURL string
-	// if contentType == "img" {
-	// 	uploadURL = fmt.Sprintf("https://api.cloudinary.com/v1_1/%s/image/upload", uploadInfo.CloudName)
-	// } else {
 	var uploadURL = "https://ppl-ai-file-upload.s3.amazonaws.com/"
-	// }
 
 	resp, err := c.client.R().
 		SetHeader("Content-Type", writer.FormDataContentType()).
@@ -564,33 +684,20 @@ func (c *Client) UloadFileToCloudinary(uploadInfo CloudinaryUploadInfo, contentT
 		return err
 	}
 	logger.Info(fmt.Sprintf("Image Upload with status code %d: %s", resp.StatusCode, resp.String()))
-	// if contentType == "img" {
-	// 	var uploadResponse map[string]interface{}
-	// 	if err := json.Unmarshal(resp.Bytes(), &uploadResponse); err != nil {
-	// 		return err
-	// 	}
-	// 	imgUrl := uploadResponse["secure_url"].(string)
-	// 	imgUrl = "https://pplx-res.cloudinary.com/image/private" + imgUrl[strings.Index(imgUrl, "/user_uploads"):]
-	// 	c.Attachments = append(c.Attachments, imgUrl)
-	// } else {
 	c.Attachments = append(c.Attachments, "https://ppl-ai-file-upload.s3.amazonaws.com/"+uploadInfo.Key)
-	// }
 	return nil
 }
 
-// SetBigContext is a placeholder for setting context
 func (c *Client) UploadText(context string) error {
 	logger.Info("Uploading txt to AWS")
 	filedata := base64.StdEncoding.EncodeToString([]byte(context))
 	filename := utils.RandomString(5) + ".txt"
-	// Upload images to Cloudinary
 	uploadURLResponse, err := c.createUploadURL(filename, "text/plain")
 	if err != nil {
 		logger.Error(fmt.Sprintf("Error creating upload URL: %v", err))
 		return err
 	}
 	logger.Info(fmt.Sprintf("Upload URL response: %v", uploadURLResponse))
-	// Upload txt to Cloudinary
 	err = c.UloadFileToCloudinary(uploadURLResponse.Fields, "txt", filedata, filename)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Error uploading image: %v", err))

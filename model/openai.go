@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"pplx2api/logger"
 	"time"
 
@@ -66,6 +67,17 @@ type Usage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function ToolCallFunction `json:"function"`
+}
+
+type ToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
 func ReturnOpenAIResponse(text string, stream bool, gc *gin.Context) error {
 	if stream {
 		return streamRespose(text, gc)
@@ -126,5 +138,36 @@ func noStreamResponse(text string, gc *gin.Context) error {
 	}
 
 	gc.JSON(200, openAIResp)
+	return nil
+}
+
+func ReturnToolCallResponse(toolCallID, functionName, arguments string, stream bool, gc *gin.Context) error {
+	id := uuid.New().String()
+	created := time.Now().Unix()
+	model := "claude-3-7-sonnet-20250219"
+	argsEscaped, _ := json.Marshal(arguments)
+	if stream {
+		gc.Writer.Header().Set("Content-Type", "text/event-stream")
+		gc.Writer.Header().Set("Cache-Control", "no-cache")
+		gc.Writer.Header().Set("Connection", "keep-alive")
+		gc.Writer.WriteHeader(http.StatusOK)
+		gc.Writer.Flush()
+
+		fmt.Fprintf(gc.Writer, `data: {"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":{"role":"assistant","content":null},"logprobs":null,"finish_reason":null}]}`+"\n\n", id, created, model)
+		gc.Writer.Flush()
+
+		fmt.Fprintf(gc.Writer, `data: {"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]},"logprobs":null,"finish_reason":null}]}`+"\n\n", id, created, model, toolCallID, functionName, string(argsEscaped))
+		gc.Writer.Flush()
+
+		fmt.Fprintf(gc.Writer, `data: {"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"tool_calls"}]}`+"\n\n", id, created, model)
+		gc.Writer.Flush()
+
+		gc.Writer.Write([]byte("data: [DONE]\n\n"))
+		gc.Writer.Flush()
+	} else {
+		gc.Writer.Header().Set("Content-Type", "application/json")
+		gc.Writer.WriteHeader(http.StatusOK)
+		fmt.Fprintf(gc.Writer, `{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]},"logprobs":null,"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`, id, created, model, toolCallID, functionName, string(argsEscaped))
+	}
 	return nil
 }
