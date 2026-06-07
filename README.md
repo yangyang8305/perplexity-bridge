@@ -2,6 +2,14 @@
 
 An OpenAI-compatible proxy for Perplexity AI. Uses the Perplexity web API under the hood, exposes a standard `/v1/chat/completions` endpoint.
 
+## What's New vs Upstream
+
+This fork adds the following on top of the original [pplx2api](https://github.com/yushangxiao/pplx2api):
+
+- **Tool calling (function calling)** – the upstream only supports plain chat. This fork adds a meta-request proxy: when `tools` are in the request, it asks Perplexity "which tool to call?", parses the JSON response, and returns OpenAI-compatible `tool_calls`. This enables agentic use (e.g. OpenCode, LangChain, Vercel AI SDK) without Perplexity natively supporting function calling.
+- **Updated model list** – 22 validated model mappings covering Claude 4.6, GPT 5.4, Gemini 3.1, Grok 4.1, Sonar, Kimi, DeepSeek R1, o4-mini, and more. Each available with or without `-search` suffix.
+- **Provider-prefix stripping** – models can be requested as `pplx2api/claude-4.6-sonnet` (the prefix is stripped automatically), compatible with OpenCode's provider selector.
+
 ## Features
 
 - **OpenAI-compatible API** – drop-in replacement for any OpenAI client
