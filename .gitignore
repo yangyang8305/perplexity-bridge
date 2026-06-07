@@ -1,6 +1,9 @@
 pplx2api.exe
+pplx2api.exe~
 .env
 sessions.json
+run.ps1
 *.log
 .DS_Store
 Thumbs.db
+test_models.ps1
