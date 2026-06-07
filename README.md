@@ -2,6 +2,10 @@
 
 An OpenAI-compatible proxy for Perplexity AI. Uses the Perplexity web API under the hood, exposes a standard `/v1/chat/completions` endpoint.
 
+**中文** – 基于 Perplexity 网页接口的 OpenAI 兼容代理。将 Perplexity 的私有 API 转换为标准的 `/v1/chat/completions` 端点，支持工具调用（Tool Calling）、流式输出、识图、联网搜索等功能。可无缝接入 OpenCode、LangChain、Vercel AI SDK 等任意 OpenAI 客户端。
+
+**日本語** – Perplexity の Web API を OpenAI 互換のエンドポイントに変換するプロキシです。ツール呼び出し、ストリーミング、画像認識、Web 検索などをサポート。OpenCode、LangChain、Vercel AI SDK などの OpenAI クライアントからそのまま利用できます。
+
 ## What's New vs Upstream
 
 This fork adds the following on top of the original [pplx2api](https://github.com/yushangxiao/pplx2api):
