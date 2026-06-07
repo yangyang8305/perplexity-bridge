@@ -2,11 +2,28 @@ package config
 
 var ModelReverseMap = map[string]string{}
 var ModelMap = map[string]string{
-	"claude-4-6-sonnet":       "claude46sonnet",
+	"claude-4.6-sonnet":       "claude46sonnet",
 	"claude-4.6-sonnet-think": "claude46sonnetthinking",
 	"gemini-3.1-pro":          "gemini31pro_high",
 	"gpt-5.4":                 "gpt54",
 	"gpt-5.4-think":           "gpt54_thinking",
+	"gpt-5.2":                 "gpt52",
+	"claude-4.5-sonnet":       "claude45sonnet",
+	"gemini-3-pro":            "gemini3pro",
+	"grok-4.1":                "grok41",
+	"sonar":                   "sonar",
+	"sonar-pro":               "sonar-pro",
+	"sonar-reasoning":         "sonar_reasoning",
+	"sonar-reasoning-pro":     "sonar-reasoning-pro",
+	"sonar-deep-research":     "sonar_deep_research",
+	"kimi":                    "kimi",
+	"kimi-k2":                 "kimi-k2",
+	"kimi-k2-think":           "kimi_k2_thinking",
+	"o4-mini":                 "o4-mini",
+	"deepseek-r1":             "deepseek-r1",
+	"gpt-4o":                  "gpt-4o",
+	"gpt-4.1":                 "gpt-4.1",
+	"claude-4.0-sonnet":       "claude-4.0-sonnet",
 }
 var MaxModelMap = map[string]string{
 	"claude-4.6-opus":       "claude46opus",
