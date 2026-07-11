@@ -81,8 +81,6 @@ func ChatCompletionsHandler(c *gin.Context) {
 			continue
 		}
 		if role == "tool" {
-			// Perplexity does not have an OpenAI-style "tool" role.
-			// Inject results as a labelled context block so the model can use them.
 			toolCallID := core.ExtractToolCallID(msg)
 			content, _ := msg["content"].(string)
 			prompt.WriteString(fmt.Sprintf("[Tool result for call %s]\n%s\n\n", toolCallID, content))
@@ -141,8 +139,14 @@ func ChatCompletionsHandler(c *gin.Context) {
 						} else if itemType == "image_url" {
 							if imageUrl, ok := itemMap["image_url"].(map[string]interface{}); ok {
 								if url, ok := imageUrl["url"].(string); ok {
+									// B5 fix: safe data-URI extraction — avoid panic when no comma
 									if strings.HasPrefix(url, "data:image/") {
-										url = strings.Split(url, ",")[1]
+										if idx := strings.Index(url, ","); idx >= 0 {
+											url = url[idx+1:]
+										} else {
+											logger.Warn("image_url data-URI has no comma, skipping")
+											continue
+										}
 									}
 									img_data_list = append(img_data_list, url)
 								}
@@ -160,17 +164,19 @@ func ChatCompletionsHandler(c *gin.Context) {
 		prompt.WriteString("\n(Based on the tool results above, provide the final answer to the user's request. Be direct and complete.)\nAssistant: ")
 	}
 
-	var rootPrompt strings.Builder
-	rootPrompt.WriteString(prompt.String())
+	// B4 fix: capture rootPrompt BEFORE any loop mutation (UploadText resets prompt)
+	rootPromptStr := prompt.String()
 
 	var pplxClient *core.Client
-	index := config.Sr.NextIndex()
+	// B1 fix: get starting index once; loop increments before use so index 0 is included
+	startIndex := config.Sr.NextIndex()
 	for i := 0; i < config.ConfigInstance.RetryCount; i++ {
-		if i > 0 {
-			prompt.Reset()
-			prompt.WriteString(rootPrompt.String())
-		}
-		index = (index + 1) % len(config.ConfigInstance.Sessions)
+		// Reset prompt to the original pre-upload version on every attempt
+		prompt.Reset()
+		prompt.WriteString(rootPromptStr)
+
+		// B1 fix: use (startIndex + i) % len so first attempt uses startIndex, not startIndex+1
+		index := (startIndex + i) % len(config.ConfigInstance.Sessions)
 		session, err := config.ConfigInstance.GetSessionForModel(index)
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to get session for model %s: %v", m, err))
@@ -195,7 +201,6 @@ func ChatCompletionsHandler(c *gin.Context) {
 		}
 
 		if hasTools && !hasToolResults {
-			// Round 1: decide which tool(s) to call.
 			userMsg := core.GetLastUserMessage(req.Messages)
 			toolCalls, err := pplxClient.DetermineToolCalls(userMsg, toolDefs)
 			if err != nil {
@@ -210,7 +215,6 @@ func ChatCompletionsHandler(c *gin.Context) {
 				for _, tc := range toolCalls {
 					logger.Info(fmt.Sprintf("Tool call: %s args=%s", tc.Function.Name, tc.Function.Arguments))
 				}
-				// Convert to raw [id, name, arguments] to call the actual response helper.
 				rawCalls := make([][3]string, 0, len(toolCalls))
 				for _, tc := range toolCalls {
 					rawCalls = append(rawCalls, [3]string{tc.ID, tc.Function.Name, tc.Function.Arguments})
@@ -224,7 +228,6 @@ func ChatCompletionsHandler(c *gin.Context) {
 				}
 			}
 		} else if hasTools && hasToolResults {
-			// Round 2: tool results are inlined as context; get the final answer.
 			if req.Stream {
 				if statusCode, err := pplxClient.SendMessage(prompt.String(), true, config.ConfigInstance.IsIncognito, c); err != nil {
 					logger.Error(fmt.Sprintf("Tool result stream failed: status=%d err=%v", statusCode, err))

@@ -87,12 +87,15 @@ type ToolCallFunctionInfo struct {
 	Arguments string
 }
 
+// responseModel is the placeholder model name returned to clients.
+// B2 fix: was hardcoded inline in both stream and nostream; centralised here.
+const responseModel = "perplexity-bridge"
+
 func ReturnOpenAIResponse(text string, stream bool, gc *gin.Context) error {
 	if stream {
 		return streamRespose(text, gc)
-	} else {
-		return noStreamResponse(text, gc)
 	}
+	return noStreamResponse(text, gc)
 }
 
 func streamRespose(text string, gc *gin.Context) error {
@@ -100,13 +103,11 @@ func streamRespose(text string, gc *gin.Context) error {
 		ID:      uuid.New().String(),
 		Object:  "chat.completion.chunk",
 		Created: time.Now().Unix(),
-		Model:   "claude-3-7-sonnet-20250219",
+		Model:   responseModel, // B2 fix
 		Choices: []StreamChoice{
 			{
-				Index: 0,
-				Delta: Delta{
-					Content: text,
-				},
+				Index:        0,
+				Delta:        Delta{Content: text},
 				Logprobs:     nil,
 				FinishReason: nil,
 			},
@@ -114,24 +115,26 @@ func streamRespose(text string, gc *gin.Context) error {
 	}
 
 	jsonBytes, err := json.Marshal(openAIResp)
-	jsonBytes = append([]byte("data: "), jsonBytes...)
-	jsonBytes = append(jsonBytes, []byte("\n\n")...)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Error marshalling JSON: %v", err))
 		return err
 	}
-
+	jsonBytes = append([]byte("data: "), jsonBytes...)
+	jsonBytes = append(jsonBytes, []byte("\n\n")...)
 	gc.Writer.Write(jsonBytes)
 	gc.Writer.Flush()
 	return nil
 }
 
+// B7 fix: use gc.Writer instead of gc.JSON so the response is flushable
+// and consistent with streamRespose. gc.JSON calls WriteHeader internally
+// which would conflict if headers were already sent in a stream scenario.
 func noStreamResponse(text string, gc *gin.Context) error {
 	openAIResp := &OpenAIResponse{
 		ID:      uuid.New().String(),
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
-		Model:   "claude-3-7-sonnet-20250219",
+		Model:   responseModel, // B2 fix
 		Choices: []NoStreamChoice{
 			{
 				Index: 0,
@@ -144,27 +147,14 @@ func noStreamResponse(text string, gc *gin.Context) error {
 			},
 		},
 	}
-
-	gc.JSON(200, openAIResp)
-	return nil
-}
-
-// ReturnToolCallResponse returns a single tool call response (kept for backward compat).
-func ReturnToolCallResponse(toolCallID, functionName, arguments string, stream bool, gc *gin.Context) error {
-	type singleTC struct {
-		ID   string
-		Name string
-		Args string
+	jsonBytes, err := json.Marshal(openAIResp)
+	if err != nil {
+		logger.Error(fmt.Sprintf("Error marshalling JSON: %v", err))
+		return err
 	}
-	return returnToolCallsInternal([]singleTC{{toolCallID, functionName, arguments}}, stream, gc)
-}
-
-// ReturnToolCallsResponse returns one or more tool calls in a single response (parallel tool calls).
-// The tcs slice elements must have ID, Function.Name, Function.Arguments fields.
-func ReturnToolCallsResponse(tcs interface{ Len() int }, stream bool, gc *gin.Context) error {
-	// Accept []core.ToolCallInfo via interface — avoid import cycle by using reflection-free approach:
-	// tcs is actually passed as a plain slice from handle.go, so we use the concrete type via a type alias.
-	// Since we can't import core here, handle.go passes pre-serialized data. See below.
+	gc.Writer.Header().Set("Content-Type", "application/json")
+	gc.Writer.WriteHeader(http.StatusOK)
+	gc.Writer.Write(jsonBytes)
 	return nil
 }
 
@@ -173,9 +163,7 @@ func ReturnToolCallsResponse(tcs interface{ Len() int }, stream bool, gc *gin.Co
 func ReturnRawToolCallsResponse(calls [][3]string, stream bool, gc *gin.Context) error {
 	id := uuid.New().String()
 	created := time.Now().Unix()
-	mdl := "claude-3-7-sonnet-20250219"
 
-	// Build the tool_calls array JSON
 	type tcJSON struct {
 		Index    int    `json:"index"`
 		ID       string `json:"id"`
@@ -187,11 +175,7 @@ func ReturnRawToolCallsResponse(calls [][3]string, stream bool, gc *gin.Context)
 	}
 	tcList := make([]tcJSON, 0, len(calls))
 	for i, call := range calls {
-		tc := tcJSON{
-			Index: i,
-			ID:    call[0],
-			Type:  "function",
-		}
+		tc := tcJSON{Index: i, ID: call[0], Type: "function"}
 		tc.Function.Name = call[1]
 		tc.Function.Arguments = call[2]
 		tcList = append(tcList, tc)
@@ -205,22 +189,15 @@ func ReturnRawToolCallsResponse(calls [][3]string, stream bool, gc *gin.Context)
 		gc.Writer.WriteHeader(http.StatusOK)
 		gc.Writer.Flush()
 
-		// Chunk 1: role
-		fmt.Fprintf(gc.Writer, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null},\"logprobs\":null,\"finish_reason\":null}]}\n\n", id, created, mdl)
+		fmt.Fprintf(gc.Writer, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null},\"logprobs\":null,\"finish_reason\":null}]}\n\n", id, created, responseModel)
 		gc.Writer.Flush()
-
-		// Chunk 2: tool_calls
-		fmt.Fprintf(gc.Writer, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":%s},\"logprobs\":null,\"finish_reason\":null}]}\n\n", id, created, mdl, string(tcBytes))
+		fmt.Fprintf(gc.Writer, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":%s},\"logprobs\":null,\"finish_reason\":null}]}\n\n", id, created, responseModel, string(tcBytes))
 		gc.Writer.Flush()
-
-		// Chunk 3: finish
-		fmt.Fprintf(gc.Writer, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\",\"choices\":[{\"index\":0,\"delta\":{},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}]}\n\n", id, created, mdl)
+		fmt.Fprintf(gc.Writer, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\",\"choices\":[{\"index\":0,\"delta\":{},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}]}\n\n", id, created, responseModel)
 		gc.Writer.Flush()
-
 		gc.Writer.Write([]byte("data: [DONE]\n\n"))
 		gc.Writer.Flush()
 	} else {
-		// Build tool_calls for non-stream message
 		type tcMsgItem struct {
 			ID       string `json:"id"`
 			Type     string `json:"type"`
@@ -237,11 +214,10 @@ func ReturnRawToolCallsResponse(calls [][3]string, stream bool, gc *gin.Context)
 			msgTCs = append(msgTCs, item)
 		}
 		tcMsgBytes, _ := json.Marshal(msgTCs)
-
 		gc.Writer.Header().Set("Content-Type", "application/json")
 		gc.Writer.WriteHeader(http.StatusOK)
 		fmt.Fprintf(gc.Writer, `{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":%s},"logprobs":null,"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
-			id, created, mdl, string(tcMsgBytes))
+			id, created, responseModel, string(tcMsgBytes))
 	}
 	return nil
 }
@@ -257,4 +233,9 @@ func returnToolCallsInternal(calls []struct {
 		raw[i] = [3]string{c.ID, c.Name, c.Args}
 	}
 	return ReturnRawToolCallsResponse(raw, stream, gc)
+}
+
+// ReturnToolCallResponse returns a single tool call response.
+func ReturnToolCallResponse(toolCallID, functionName, arguments string, stream bool, gc *gin.Context) error {
+	return returnToolCallsInternal([]struct{ ID, Name, Args string }{{toolCallID, functionName, arguments}}, stream, gc)
 }
