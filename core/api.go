@@ -281,13 +281,56 @@ func (c *Client) SendMessageCollect(message string, is_incognito bool) (string, 
 	return c.collectResponse(resp.Body)
 }
 
+// DetermineToolCalls runs a two-phase tool selection when the tool list exceeds
+// MaxToolsPerRound, otherwise uses a single-phase approach.
+//
+// Phase 1 (only when len(tools) > MaxToolsPerRound):
+//   Send a lightweight prompt containing only tool names and descriptions.
+//   The model returns at most MaxToolsPerRound tool names.
+//
+// Phase 2 (always the final step):
+//   Send the full JSON schema prompt for the selected (or original) tools.
+//   The model fills in the arguments.
+//
+// If either phase fails or returns unparseable output, an error is returned
+// immediately — no fallback to direct answer.
 func (c *Client) DetermineToolCalls(userMessage string, tools []ToolDefinition) ([]ToolCallInfo, error) {
-	prompt := BuildToolSelectionPrompt(userMessage, tools)
-	text, err := c.SendMessageCollect(prompt, true)
-	if err != nil {
-		return nil, err
+	// Fast path: tool count within limit, skip phase 1.
+	if len(tools) <= MaxToolsPerRound {
+		prompt := BuildToolSelectionPrompt(userMessage, tools)
+		text, err := c.SendMessageCollect(prompt, true)
+		if err != nil {
+			return nil, err
+		}
+		return ParseToolSelectionJSONMulti(text), nil
 	}
-	return ParseToolSelectionJSONMulti(text), nil
+
+	// Phase 1: select tool names from a lightweight prompt.
+	phase1Prompt := BuildToolNameSelectionPrompt(userMessage, tools)
+	phase1Text, err := c.SendMessageCollect(phase1Prompt, true)
+	if err != nil {
+		return nil, fmt.Errorf("tool selection phase 1 failed: %w", err)
+	}
+	selectedNames, err := ParseToolNames(phase1Text)
+	if err != nil {
+		return nil, fmt.Errorf("tool selection phase 1 parse error: %w", err)
+	}
+	if len(selectedNames) == 0 {
+		// Model determined no tool is needed.
+		return nil, nil
+	}
+
+	// Phase 2: fill arguments using full schema for selected tools only.
+	selectedTools := FilterToolsByNames(tools, selectedNames)
+	if len(selectedTools) == 0 {
+		return nil, fmt.Errorf("tool selection phase 1 returned unknown tool names: %v", selectedNames)
+	}
+	phase2Prompt := BuildToolSelectionPrompt(userMessage, selectedTools)
+	phase2Text, err := c.SendMessageCollect(phase2Prompt, true)
+	if err != nil {
+		return nil, fmt.Errorf("tool selection phase 2 failed: %w", err)
+	}
+	return ParseToolSelectionJSONMulti(phase2Text), nil
 }
 
 func (c *Client) collectResponse(body io.ReadCloser) (string, error) {

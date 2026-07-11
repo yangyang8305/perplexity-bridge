@@ -204,11 +204,11 @@ func ChatCompletionsHandler(c *gin.Context) {
 			userMsg := core.GetLastUserMessage(req.Messages)
 			toolCalls, err := pplxClient.DetermineToolCalls(userMsg, toolDefs)
 			if err != nil {
-				logger.Error(fmt.Sprintf("Tool determination failed: %v — falling back to direct answer", err))
-				if _, err := pplxClient.SendMessage(prompt.String(), req.Stream, config.ConfigInstance.IsIncognito, c); err != nil {
-					logger.Error(fmt.Sprintf("Fallback send failed: %v", err))
-					continue
-				}
+				// Two-phase tool selection failed: return error immediately, do not retry or fall back.
+				logger.Error(fmt.Sprintf("Tool determination failed: %v", err))
+				c.JSON(http.StatusInternalServerError, ErrorResponse{
+					Error: fmt.Sprintf("Tool selection failed: %v", err),
+				})
 				return
 			}
 			if len(toolCalls) > 0 {

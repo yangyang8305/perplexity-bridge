@@ -206,3 +206,74 @@ func ParseToolSelectionJSONMulti(text string) []ToolCallInfo {
 
 	return nil
 }
+
+// MaxToolsPerRound is the maximum number of tools sent to Perplexity per round.
+// Sending more tools degrades model reasoning quality significantly.
+const MaxToolsPerRound = 3
+
+// BuildToolNameSelectionPrompt builds a lightweight phase-1 prompt that lists
+// only tool names and descriptions, asking the model to pick at most
+// MaxToolsPerRound tools relevant to the user request.
+func BuildToolNameSelectionPrompt(userMessage string, tools []ToolDefinition) string {
+	var sb strings.Builder
+	sb.WriteString("You are a tool selector. Output ONLY valid JSON, no markdown, no explanation.\n\n")
+	sb.WriteString(fmt.Sprintf("User request: \"%s\"\n\n", userMessage))
+	sb.WriteString(fmt.Sprintf("Pick at most %d tools from the list below that are needed to fulfill the request.\n", MaxToolsPerRound))
+	sb.WriteString("If no tool is needed, return {\"tools\": []}.\n\n")
+	sb.WriteString("Available tools:\n")
+	for _, t := range tools {
+		sb.WriteString(fmt.Sprintf("- %s: %s\n", t.Function.Name, t.Function.Description))
+	}
+	sb.WriteString("\nRespond with ONLY:\n{\"tools\": [\"tool_name_1\", \"tool_name_2\"]}\n")
+	return sb.String()
+}
+
+// ParseToolNames parses the phase-1 model response and returns the list of
+// selected tool names. Returns an error if the response is not valid JSON or
+// does not contain the expected structure.
+func ParseToolNames(text string) ([]string, error) {
+	start := strings.Index(text, "{")
+	if start < 0 {
+		return nil, fmt.Errorf("tool name selection: no JSON found in response: %q", text)
+	}
+	depth, end := 0, -1
+	for i := start; i < len(text); i++ {
+		switch text[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				end = i
+			}
+		}
+		if end >= 0 {
+			break
+		}
+	}
+	if end < 0 {
+		return nil, fmt.Errorf("tool name selection: unterminated JSON in response: %q", text)
+	}
+	var result struct {
+		Tools []string `json:"tools"`
+	}
+	if err := json.Unmarshal([]byte(text[start:end+1]), &result); err != nil {
+		return nil, fmt.Errorf("tool name selection: JSON parse error: %w (raw: %q)", err, text)
+	}
+	return result.Tools, nil
+}
+
+// FilterToolsByNames returns the subset of all that match the given names.
+func FilterToolsByNames(all []ToolDefinition, names []string) []ToolDefinition {
+	nameSet := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		nameSet[n] = struct{}{}
+	}
+	var out []ToolDefinition
+	for _, t := range all {
+		if _, ok := nameSet[t.Function.Name]; ok {
+			out = append(out, t)
+		}
+	}
+	return out
+}
