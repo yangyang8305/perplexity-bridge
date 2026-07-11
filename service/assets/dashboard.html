@@ -95,6 +95,27 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-s
 .toggle input:checked+.slider{background:var(--accent)}
 .toggle input:checked+.slider:before{transform:translateX(18px)}
 .save-btn{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px 24px;font-size:.85rem;cursor:pointer}
+
+/* Guide tab */
+#tab-guide{padding:0;overflow:hidden}
+.guide-wrap{padding:28px 32px;overflow-y:auto;height:100%;max-width:860px}
+.guide-wrap h2{font-size:1.15rem;font-weight:700;margin-bottom:20px;color:var(--accent)}
+.guide-wrap h3{font-size:.9rem;font-weight:700;margin:24px 0 10px;color:var(--text)}
+.guide-wrap p{font-size:.875rem;line-height:1.7;color:var(--muted);margin-bottom:10px}
+.guide-wrap ul{font-size:.875rem;line-height:1.8;color:var(--muted);padding-left:1.4em;margin-bottom:10px}
+.guide-wrap li{margin-bottom:4px}
+.guide-wrap code{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.8rem;background:#0d0f1a;border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--accent2)}
+.guide-wrap pre{background:#0d0f1a;border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:.8rem;font-family:'JetBrains Mono','Fira Code',monospace;color:#c9d1d9;margin-bottom:14px;line-height:1.6}
+.guide-wrap .tag{display:inline-block;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:2px 9px;font-size:.75rem;color:var(--accent);margin:2px 3px 2px 0;vertical-align:middle}
+.guide-section{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px 22px;margin-bottom:18px}
+.guide-section-title{font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);margin-bottom:12px}
+.kv-table{width:100%;border-collapse:collapse;font-size:.82rem;margin-bottom:6px}
+.kv-table th{text-align:left;color:var(--muted);font-weight:600;padding:5px 8px;border-bottom:1px solid var(--border)}
+.kv-table td{padding:6px 8px;color:var(--text);vertical-align:top;border-bottom:1px solid var(--border)}
+.kv-table td:first-child{color:var(--accent2);font-family:'JetBrains Mono',monospace;white-space:nowrap}
+.kv-table tr:last-child td{border-bottom:none}
+.tip{background:#1a2a1a;border:1px solid #2a4a2a;border-radius:8px;padding:10px 14px;font-size:.82rem;color:#8bcf8e;margin-bottom:12px}
+.warn{background:#2a1a1a;border:1px solid #4a2a2a;border-radius:8px;padding:10px 14px;font-size:.82rem;color:#f87171;margin-bottom:12px}
 </style>
 </head>
 <body>
@@ -116,6 +137,10 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-s
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
     Settings
   </div>
+  <div class="nav-item" onclick="switchTab('guide',this)">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+    Usage Guide
+  </div>
   <div class="sidebar-bottom">
     <div class="status-pill"><span class="status-dot"></span> Running</div>
     <div style="font-size:.72rem;color:var(--muted);margin-top:4px" id="base-url-display">http://127.0.0.1:8080</div>
@@ -123,6 +148,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-s
 </nav>
 
 <div id="main">
+  <!-- ===== CHAT ===== -->
   <div id="tab-chat" class="tab-content active">
     <div id="chat-messages">
       <div style="text-align:center;color:var(--muted);font-size:.85rem;margin:auto">
@@ -145,6 +171,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-s
     </div>
   </div>
 
+  <!-- ===== DASHBOARD ===== -->
   <div id="tab-dashboard" class="tab-content">
     <div style="padding:24px;overflow-y:auto;flex:1">
       <div class="dash-grid">
@@ -170,6 +197,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-s
     </div>
   </div>
 
+  <!-- ===== SETTINGS ===== -->
   <div id="tab-settings" class="tab-content">
     <div style="padding:24px;overflow-y:auto;flex:1">
       <div class="settings-section">
@@ -188,6 +216,118 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-s
         <div class="form-row"><textarea id="s-sysprompt" rows="5" placeholder="Optional system prompt for all conversations&#8230;" oninput="saveSettings()"></textarea></div>
       </div>
       <button class="save-btn" onclick="alert('Settings auto-saved.')">&#10003; Saved</button>
+    </div>
+  </div>
+
+  <!-- ===== USAGE GUIDE ===== -->
+  <div id="tab-guide" class="tab-content">
+    <div class="guide-wrap">
+      <h2>&#128218; Perplexity Bridge — 使用说明</h2>
+      <p>Perplexity Bridge 是一个本地反向代理，把 <strong>Perplexity.ai 的 Web 会话（Cookie）</strong>包装成标准 OpenAI Chat Completions API，让任何支持 OpenAI 格式的客户端（Cursor、Continue、OpenCat 等）直接接入。</p>
+
+      <!-- 快速开始 -->
+      <div class="guide-section">
+        <div class="guide-section-title">&#9889; 快速开始</div>
+        <h3>第一步 — 获取 Perplexity Session Token</h3>
+        <ol style="font-size:.875rem;color:var(--muted);padding-left:1.4em;line-height:1.9">
+          <li>用浏览器登录 <strong>perplexity.ai</strong></li>
+          <li>打开开发者工具 → Application → Cookies → <code>www.perplexity.ai</code></li>
+          <li>找到 Cookie 名 <code>__Secure-next-auth.session-token</code>，复制其 Value</li>
+          <li>多账号可用逗号分隔，写入 <code>SESSIONS</code> 环境变量</li>
+        </ol>
+        <h3>第二步 — 配置 .env</h3>
+        <pre>SESSIONS=eyJhbGc...（你的token）,eyJhbGc...（第二个，可选）
+ADDRESS=127.0.0.1:8080
+APIKEY=                     # 留空 = 不鉴权；填写则所有请求必须带 Bearer Token
+PROXY=                      # 可选，如 http://127.0.0.1:7890
+IS_INCOGNITO=true           # 建议开启，不记录对话历史
+IS_MAX_SUBSCRIBE=false      # Max 订阅用户设为 true 可解锁更多模型
+MAX_CHAT_HISTORY_LENGTH=10000  # 超过此字数自动上传为附件</pre>
+        <h3>第三步 — 启动服务</h3>
+        <pre>go build -o perplexity-bridge . && ./perplexity-bridge
+# 或直接
+go run .</pre>
+        <p>启动成功后在浏览器打开 <code>http://127.0.0.1:8080</code> 即可看到本页面。</p>
+      </div>
+
+      <!-- API 接入 -->
+      <div class="guide-section">
+        <div class="guide-section-title">&#128279; 在第三方客户端中接入</div>
+        <table class="kv-table">
+          <tr><th>字段</th><th>填写内容</th></tr>
+          <tr><td>API Base URL</td><td><code>http://127.0.0.1:8080/v1</code>（或 <code>/hf/v1</code>）</td></tr>
+          <tr><td>API Key</td><td>与 <code>APIKEY</code> 环境变量一致；若未设置则随便填</td></tr>
+          <tr><td>Model</td><td>见下方模型列表</td></tr>
+        </table>
+        <div class="tip">&#128161; HuggingFace Space 兼容路径：<code>/hf/v1/chat/completions</code></div>
+      </div>
+
+      <!-- 模型列表 -->
+      <div class="guide-section">
+        <div class="guide-section-title">&#129302; 可用模型</div>
+        <p>所有模型名后加 <code>-search</code> 即可开启联网搜索，例如 <code>claude-4.6-sonnet-search</code>。</p>
+        <table class="kv-table">
+          <tr><th>模型名</th><th>说明</th></tr>
+          <tr><td>claude-4.6-sonnet</td><td>Claude 最新 Sonnet，综合能力强，首选</td></tr>
+          <tr><td>claude-4.6-sonnet-think</td><td>同上 + 深度思考模式</td></tr>
+          <tr><td>claude-4.5-sonnet / claude-4.0-sonnet</td><td>上一代 Sonnet</td></tr>
+          <tr><td>claude-4.6-opus / claude-4.6-opus-think</td><td>Max 订阅专属，能力最强</td></tr>
+          <tr><td>gpt-5.4 / gpt-5.4-think</td><td>OpenAI GPT-5.4（含思考版）</td></tr>
+          <tr><td>gpt-5.2 / gpt-4.1 / gpt-4o / o4-mini</td><td>OpenAI 各代模型</td></tr>
+          <tr><td>gemini-3.1-pro / gemini-3-pro</td><td>Google Gemini</td></tr>
+          <tr><td>grok-4.1</td><td>xAI Grok</td></tr>
+          <tr><td>kimi / kimi-k2 / kimi-k2-think</td><td>月之暗面 Kimi</td></tr>
+          <tr><td>deepseek-r1</td><td>DeepSeek R1</td></tr>
+          <tr><td>sonar / sonar-pro</td><td>Perplexity 自研搜索模型</td></tr>
+          <tr><td>sonar-reasoning / sonar-reasoning-pro</td><td>Perplexity 推理搜索</td></tr>
+          <tr><td>sonar-deep-research</td><td>Perplexity 深度研究模式</td></tr>
+        </table>
+      </div>
+
+      <!-- 高级功能 -->
+      <div class="guide-section">
+        <div class="guide-section-title">&#128295; 高级功能</div>
+        <h3>多 Session 轮询</h3>
+        <p><code>SESSIONS</code> 用逗号分隔多个 token，系统自动轮询。某个 session 失效后会在下次刷新时自动剔除。</p>
+        <h3>自动刷新 Cookie</h3>
+        <p>每 24 小时自动刷新所有 session token 并写入 <code>sessions.json</code>。Dashboard → <strong>Refresh Cookie Now</strong> 可立即触发。</p>
+        <h3>长文本自动上传</h3>
+        <p>对话历史超过 <code>MAX_CHAT_HISTORY_LENGTH</code> 字节时，自动以附件方式上传至 Perplexity S3，绕过请求体长度限制。</p>
+        <h3>图片输入</h3>
+        <p>消息中 <code>image_url</code> 类型的内容会自动上传至 Perplexity CDN，模型可直接处理。支持 base64 data-URI 和外链 URL。</p>
+        <h3>Function Calling / Tool Use</h3>
+        <p>支持 OpenAI 格式的 <code>tools</code> 字段。Bridge 会先让模型决策是否需要调用工具，再将结果发回，全程透明。</p>
+      </div>
+
+      <!-- 常见问题 -->
+      <div class="guide-section">
+        <div class="guide-section-title">&#10067; 常见问题</div>
+        <h3>返回 503 — No SESSIONS configured</h3>
+        <p>环境变量 <code>SESSIONS</code> 未设置或为空。检查 <code>.env</code> 文件是否在工作目录，token 是否正确填写。</p>
+        <h3>返回 401 — Invalid API key</h3>
+        <p>客户端发送的 Bearer Token 与 <code>APIKEY</code> 不匹配。若不需要鉴权，将 <code>APIKEY</code> 留空即可。</p>
+        <h3>Session 失效 / 返回 401 from Perplexity</h3>
+        <p>Session token 已过期（通常因长时间未使用或账号在其他地方登出）。点击 Dashboard → <strong>Refresh Cookie Now</strong>，或重新从浏览器获取 token 并更新 <code>SESSIONS</code>，再点 <strong>Reload Config</strong>。</p>
+        <h3>所有重试都失败 / 返回 500</h3>
+        <p>可能是 Perplexity 触发了速率限制（429）或账号异常。检查 token 是否有效，等待几分钟后重试。</p>
+        <h3>模型名不对 / 想用搜索</h3>
+        <p>在模型名末尾加 <code>-search</code>，例如 <code>gpt-5.4-search</code>，即可开启联网搜索。Chat 界面点 <strong>Search</strong> 按钮效果相同。</p>
+        <div class="warn">&#9888;&#65039; 本服务依赖 Perplexity Web 非官方接口，可能随 Perplexity 页面更新而失效。如遇大面积故障请检查是否有新版本。</div>
+      </div>
+
+      <!-- 接口参考 -->
+      <div class="guide-section">
+        <div class="guide-section-title">&#128196; API 端点参考</div>
+        <table class="kv-table">
+          <tr><th>Method</th><th>路径</th><th>说明</th></tr>
+          <tr><td>POST</td><td><code>/v1/chat/completions</code></td><td>主对话接口，兼容 OpenAI 格式</td></tr>
+          <tr><td>GET</td><td><code>/v1/models</code></td><td>返回所有可用模型列表</td></tr>
+          <tr><td>GET</td><td><code>/health</code></td><td>健康检查，返回 <code>{"status":"ok"}</code></td></tr>
+          <tr><td>GET</td><td><code>/status</code></td><td>服务状态，含 session 数量、配置信息</td></tr>
+          <tr><td>POST</td><td><code>/admin/refresh</code></td><td>立即刷新所有 session cookie（需 Bearer Token）</td></tr>
+          <tr><td>POST</td><td><code>/admin/reload</code></td><td>热重载 .env 配置（需 Bearer Token）</td></tr>
+        </table>
+      </div>
     </div>
   </div>
 </div>
