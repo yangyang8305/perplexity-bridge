@@ -37,10 +37,9 @@ type Config struct {
 	IgnoreSerchResult      bool
 	IgnoreModelMonitoring  bool
 	IsMaxSubscribe         bool
-	Timezone               string // Fix #7: configurable timezone
+	Timezone               string
 }
 
-// parseSessionEnv parses the SESSIONS env var (comma-separated session tokens).
 func parseSessionEnv(envValue string) (int, []SessionInfo) {
 	if envValue == "" {
 		return 0, []SessionInfo{}
@@ -59,7 +58,6 @@ func parseSessionEnv(envValue string) (int, []SessionInfo) {
 	return retryCount, sessions
 }
 
-// GetSessionForModel returns the session at the given index, holding a read lock.
 func (c *Config) GetSessionForModel(idx int) (SessionInfo, error) {
 	if len(c.Sessions) == 0 || idx < 0 || idx >= len(c.Sessions) {
 		return SessionInfo{}, fmt.Errorf("invalid session index: %d", idx)
@@ -69,7 +67,6 @@ func (c *Config) GetSessionForModel(idx int) (SessionInfo, error) {
 	return c.Sessions[idx], nil
 }
 
-// LoadConfig reads all settings from environment variables.
 func LoadConfig() *Config {
 	maxChatHistoryLength, err := strconv.Atoi(os.Getenv("MAX_CHAT_HISTORY_LENGTH"))
 	if err != nil {
@@ -93,9 +90,9 @@ func LoadConfig() *Config {
 		PromptForFile:          promptForFile,
 		IgnoreSerchResult:      os.Getenv("IGNORE_SEARCH_RESULT") == "true",
 		IgnoreModelMonitoring:  os.Getenv("IGNORE_MODEL_MONITORING") == "true",
-		RwMutex:               sync.RWMutex{},
+		RwMutex:                sync.RWMutex{},
 		IsMaxSubscribe:         os.Getenv("IS_MAX_SUBSCRIBE") == "true",
-		Timezone:               os.Getenv("TIMEZONE"), // Fix #7
+		Timezone:               os.Getenv("TIMEZONE"),
 	}
 	if cfg.Address == "" {
 		cfg.Address = "127.0.0.1:8080"
@@ -114,6 +111,14 @@ func (sr *SessionRagen) NextIndex() int {
 	return index
 }
 
+// ResetIndex resets the round-robin pointer to 0.
+// A9 fix: called after bulk session pool replacement to avoid out-of-range.
+func (sr *SessionRagen) ResetIndex() {
+	sr.Mutex.Lock()
+	defer sr.Mutex.Unlock()
+	sr.Index = 0
+}
+
 func init() {
 	rand.Seed(time.Now().UnixNano())
 	_ = godotenv.Load()
@@ -127,7 +132,7 @@ func init() {
 		ConfigInstance.IsMaxSubscribe,
 	))
 	if ConfigInstance.APIKey == "" {
-		logger.Warn("APIKEY is empty — all requests will be accepted without authentication")
+		logger.Warn("APIKEY is empty — no-auth mode, all requests accepted")
 	}
 	if len(ConfigInstance.Sessions) == 0 {
 		logger.Warn("No SESSIONS configured — service will return 503 on all chat requests")

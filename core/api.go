@@ -21,50 +21,47 @@ import (
 	"github.com/imroc/req/v3"
 )
 
-// Client represents a Perplexity API client
 type Client struct {
 	sessionToken string
-	visitorID    string // fixed per-session to avoid fingerprint churn (#6)
+	visitorID    string
 	client       *req.Client
 	Model        string
 	Attachments  []string
 	OpenSerch    bool
 }
 
-// Perplexity API structures
 type PerplexityRequest struct {
 	Params   PerplexityParams `json:"params"`
 	QueryStr string           `json:"query_str"`
 }
 
 type PerplexityParams struct {
-	Attachments              []string      `json:"attachments"`
-	Language                 string        `json:"language"`
-	Timezone                 string        `json:"timezone"`
-	SearchFocus              string        `json:"search_focus"`
-	Sources                  []string      `json:"sources"`
-	SearchRecencyFilter      interface{}   `json:"search_recency_filter"`
-	FrontendUUID             string        `json:"frontend_uuid"`
-	Mode                     string        `json:"mode"`
-	ModelPreference          string        `json:"model_preference"`
-	IsRelatedQuery           bool          `json:"is_related_query"`
-	IsSponsored              bool          `json:"is_sponsored"`
-	VisitorID                string        `json:"visitor_id"`
-	UserNextauthID           string        `json:"user_nextauth_id"`
-	FrontendContextUUID      string        `json:"frontend_context_uuid"`
-	PromptSource             string        `json:"prompt_source"`
-	QuerySource              string        `json:"query_source"`
-	BrowserHistorySummary    []interface{} `json:"browser_history_summary"`
-	IsIncognito              bool          `json:"is_incognito"`
-	UseSchematizedAPI        bool          `json:"use_schematized_api"`
-	SendBackTextInStreaming  bool          `json:"send_back_text_in_streaming_api"`
-	SupportedBlockUseCases   []string      `json:"supported_block_use_cases"`
-	ClientCoordinates        interface{}   `json:"client_coordinates"`
-	IsNavSuggestionsDisabled bool          `json:"is_nav_suggestions_disabled"`
-	Version                  string        `json:"version"`
+	Attachments             []string      `json:"attachments"`
+	Language                string        `json:"language"`
+	Timezone                string        `json:"timezone"`
+	SearchFocus             string        `json:"search_focus"`
+	Sources                 []string      `json:"sources"`
+	SearchRecencyFilter     interface{}   `json:"search_recency_filter"`
+	FrontendUUID            string        `json:"frontend_uuid"`
+	Mode                    string        `json:"mode"`
+	ModelPreference         string        `json:"model_preference"`
+	IsRelatedQuery          bool          `json:"is_related_query"`
+	IsSponsored             bool          `json:"is_sponsored"`
+	VisitorID               string        `json:"visitor_id"`
+	UserNextauthID          string        `json:"user_nextauth_id"`
+	FrontendContextUUID     string        `json:"frontend_context_uuid"`
+	PromptSource            string        `json:"prompt_source"`
+	QuerySource             string        `json:"query_source"`
+	BrowserHistorySummary   []interface{} `json:"browser_history_summary"`
+	IsIncognito             bool          `json:"is_incognito"`
+	UseSchematizedAPI       bool          `json:"use_schematized_api"`
+	SendBackTextInStreaming bool          `json:"send_back_text_in_streaming_api"`
+	SupportedBlockUseCases  []string      `json:"supported_block_use_cases"`
+	ClientCoordinates       interface{}   `json:"client_coordinates"`
+	IsNavSuggestionsDisabled bool         `json:"is_nav_suggestions_disabled"`
+	Version                 string        `json:"version"`
 }
 
-// Response structures
 type PerplexityResponse struct {
 	Blocks       []Block `json:"blocks"`
 	Status       string  `json:"status"`
@@ -114,17 +111,18 @@ type ImageModeBlock struct {
 	} `json:"media_items"`
 }
 
-// pplxVersion is the Perplexity web client version sent in all requests. (#5)
 const pplxVersion = "2.18"
 
-// NewClient creates a new Perplexity API client
+// ErrSessionExpired is returned when Perplexity signals the session is invalid.
+// A7 fix: callers can detect this and skip the dead session.
+var ErrSessionExpired = fmt.Errorf("session expired or invalid")
+
 func NewClient(sessionToken string, proxy string, mdl string, openSerch bool) *Client {
 	client := req.C().SetTimeout(time.Minute * 10)
 	client.Transport.SetResponseHeaderTimeout(time.Second * 10)
 	if proxy != "" {
 		client.SetProxyURL(proxy)
 	}
-
 	headers := map[string]string{
 		"accept":          "text/event-stream, text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 		"accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7,zh-TW;q=0.6",
@@ -135,8 +133,8 @@ func NewClient(sessionToken string, proxy string, mdl string, openSerch bool) *C
 		"priority":        "u=1, i",
 		"referer":         "https://www.perplexity.ai/",
 	}
-	for key, value := range headers {
-		client.SetCommonHeader(key, value)
+	for k, v := range headers {
+		client.SetCommonHeader(k, v)
 	}
 	if sessionToken != "" {
 		client.SetCommonCookies(&http.Cookie{
@@ -144,13 +142,9 @@ func NewClient(sessionToken string, proxy string, mdl string, openSerch bool) *C
 			Value: sessionToken,
 		})
 	}
-
-	// Fix #6: stable visitorID per Client instance
-	visitorID := uuid.New().String()
-
 	return &Client{
 		sessionToken: sessionToken,
-		visitorID:    visitorID,
+		visitorID:    uuid.New().String(),
 		client:       client,
 		Model:        mdl,
 		Attachments:  []string{},
@@ -158,7 +152,6 @@ func NewClient(sessionToken string, proxy string, mdl string, openSerch bool) *C
 	}
 }
 
-// redactToken masks a session token for safe logging
 func redactToken(token string) string {
 	if len(token) <= 8 {
 		return "[REDACTED]"
@@ -166,7 +159,6 @@ func redactToken(token string) string {
 	return token[:8] + "...[REDACTED]"
 }
 
-// timezone returns the configured timezone or falls back to America/New_York. (#7)
 func timezone() string {
 	if tz := config.ConfigInstance.Timezone; tz != "" {
 		return tz
@@ -174,16 +166,13 @@ func timezone() string {
 	return "America/New_York"
 }
 
-// buildRequestBody constructs a PerplexityRequest
 func (c *Client) buildRequestBody(message string, isIncognito bool, stream bool) PerplexityRequest {
-	// Fix #8: correct SearchFocus per mode
 	searchFocus := "writing"
 	sources := []string{}
 	if c.OpenSerch {
 		searchFocus = "internet"
 		sources = append(sources, "web")
 	}
-
 	return PerplexityRequest{
 		Params: PerplexityParams{
 			Attachments:             c.Attachments,
@@ -197,38 +186,47 @@ func (c *Client) buildRequestBody(message string, isIncognito bool, stream bool)
 			ModelPreference:         c.Model,
 			IsRelatedQuery:          false,
 			IsSponsored:             false,
-			VisitorID:               c.visitorID, // Fix #6
-			UserNextauthID:          c.visitorID, // Fix #6
+			VisitorID:               c.visitorID,
+			UserNextauthID:          c.visitorID,
 			FrontendContextUUID:     uuid.New().String(),
 			PromptSource:            "user",
 			QuerySource:             "home",
 			BrowserHistorySummary:   []interface{}{},
 			IsIncognito:             isIncognito,
 			UseSchematizedAPI:       true,
-			SendBackTextInStreaming: stream, // Fix #2
+			SendBackTextInStreaming: stream,
 			SupportedBlockUseCases: []string{
-				"answer_modes",
-				"media_items",
-				"knowledge_cards",
-				"inline_entity_cards",
-				"place_widgets",
-				"finance_widgets",
-				"sports_widgets",
-				"shopping_widgets",
-				"jobs_widgets",
-				"search_result_widgets",
-				"entity_list_answer",
-				"todo_list",
+				"answer_modes", "media_items", "knowledge_cards",
+				"inline_entity_cards", "place_widgets", "finance_widgets",
+				"sports_widgets", "shopping_widgets", "jobs_widgets",
+				"search_result_widgets", "entity_list_answer", "todo_list",
 			},
 			ClientCoordinates:        nil,
 			IsNavSuggestionsDisabled: false,
-			Version:                  pplxVersion, // Fix #5
+			Version:                  pplxVersion,
 		},
 		QueryStr: message,
 	}
 }
 
-// SendMessage sends a message to Perplexity and streams or returns the response
+// isSessionExpiredResponse checks whether the HTTP response indicates the
+// session cookie is no longer valid (Perplexity returns 401 or redirects to
+// the login page when the token has expired).
+// A7 fix.
+func isSessionExpiredResponse(resp *req.Response) bool {
+	if resp.StatusCode == http.StatusUnauthorized {
+		return true
+	}
+	// Perplexity may also 302-redirect to /api/auth/signin
+	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
+		loc := resp.Header.Get("Location")
+		if strings.Contains(loc, "signin") || strings.Contains(loc, "login") {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc *gin.Context) (int, error) {
 	requestBody := c.buildRequestBody(message, is_incognito, stream)
 	logger.Info(fmt.Sprintf("Perplexity request: model=%s search=%v incognito=%v session=%s",
@@ -241,7 +239,14 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 		logger.Error(fmt.Sprintf("Error sending request: %v", err))
 		return 500, fmt.Errorf("request failed: %w", err)
 	}
-	logger.Info(fmt.Sprintf("Perplexity response status code: %d", resp.StatusCode))
+	logger.Info(fmt.Sprintf("Perplexity response status: %d", resp.StatusCode))
+
+	// A7 fix: detect expired/invalid session and signal caller to skip this session
+	if isSessionExpiredResponse(resp) {
+		resp.Body.Close()
+		logger.Warn(fmt.Sprintf("Session expired for token %s", redactToken(c.sessionToken)))
+		return http.StatusUnauthorized, ErrSessionExpired
+	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		resp.Body.Close()
 		return http.StatusTooManyRequests, fmt.Errorf("rate limit exceeded")
@@ -263,6 +268,10 @@ func (c *Client) SendMessageCollect(message string, is_incognito bool) (string, 
 		return "", fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	if isSessionExpiredResponse(resp) {
+		logger.Warn(fmt.Sprintf("Session expired for token %s", redactToken(c.sessionToken)))
+		return "", ErrSessionExpired
+	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return "", fmt.Errorf("rate limit exceeded")
 	}
@@ -272,7 +281,6 @@ func (c *Client) SendMessageCollect(message string, is_incognito bool) (string, 
 	return c.collectResponse(resp.Body)
 }
 
-// DetermineToolCalls sends a meta-prompt and returns a list of tool calls.
 func (c *Client) DetermineToolCalls(userMessage string, tools []ToolDefinition) ([]ToolCallInfo, error) {
 	prompt := BuildToolSelectionPrompt(userMessage, tools)
 	text, err := c.SendMessageCollect(prompt, true)
@@ -306,7 +314,6 @@ func (c *Client) collectResponse(body io.ReadCloser) (string, error) {
 			continue
 		}
 		if response.Status == "COMPLETED" {
-			// Fix #3: always close <think> if still open
 			if inThinking {
 				full_text += "</think>\n\n"
 			}
@@ -389,7 +396,6 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 		}
 		if response.Status == "COMPLETED" {
 			final = true
-			// Fix #3: always close <think> if still open
 			if inThinking {
 				closeTag := "</think>\n\n"
 				full_text += closeTag
@@ -427,7 +433,6 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 					}
 				}
 			}
-			// Fix #4: model drift only logged, never appended to response
 			if !config.ConfigInstance.IgnoreModelMonitoring && response.DisplayModel != c.Model {
 				logger.Warn(fmt.Sprintf("Model drift: requested=%s actual=%s",
 					c.Model, config.ModelReverseMapGet(response.DisplayModel, response.DisplayModel)))
@@ -526,7 +531,7 @@ func (c *Client) createUploadURL(filename string, contentType string) (*UploadUR
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		logger.Error(fmt.Sprintf("Image Upload with status code %d", resp.StatusCode))
+		logger.Error(fmt.Sprintf("Upload URL failed with status %d", resp.StatusCode))
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 	var uploadURLResponse UploadURLResponse
@@ -610,7 +615,6 @@ func (c *Client) UloadFileToCloudinary(uploadInfo CloudinaryUploadInfo, contentT
 	if err != nil {
 		return fmt.Errorf("S3 upload request failed: %w", err)
 	}
-	// Fix #1: S3 returns 204 No Content on success
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("S3 upload failed with status %d", resp.StatusCode)
 	}

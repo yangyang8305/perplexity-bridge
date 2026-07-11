@@ -7,25 +7,32 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// AuthMiddleware initializes the Claude client from the request header
+// AuthMiddleware validates the Bearer token against APIKEY.
+// A1 fix: when APIKEY is empty, all requests are allowed through (no-auth mode).
+// A4 fix: read APIKey under RLock to avoid race with hot-reload.
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		Key := c.GetHeader("Authorization")
-		if Key != "" {
-			Key = strings.TrimPrefix(Key, "Bearer ")
-			if Key != config.ConfigInstance.APIKey {
-				c.JSON(401, gin.H{
-					"error": "Invalid API key",
-				})
-				c.Abort()
-				return
-			}
+		config.ConfigInstance.RwMutex.RLock()
+		apiKey := config.ConfigInstance.APIKey
+		config.ConfigInstance.RwMutex.RUnlock()
+
+		// A1 fix: empty APIKEY means no-auth mode — let everything through
+		if apiKey == "" {
 			c.Next()
 			return
 		}
-		c.JSON(401, gin.H{
-			"error": "Missing or invalid Authorization header",
-		})
-		c.Abort()
+
+		key := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+		if key == "" {
+			c.JSON(401, gin.H{"error": "Missing Authorization header"})
+			c.Abort()
+			return
+		}
+		if key != apiKey {
+			c.JSON(401, gin.H{"error": "Invalid API key"})
+			c.Abort()
+			return
+		}
+		c.Next()
 	}
 }
