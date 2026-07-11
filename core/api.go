@@ -121,7 +121,6 @@ func NewClient(sessionToken string, proxy string, model string, openSerch bool) 
 		client.SetProxyURL(proxy)
 	}
 
-	// Set common headers
 	headers := map[string]string{
 		"accept":          "text/event-stream, text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 		"accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7,zh-TW;q=0.6",
@@ -132,41 +131,41 @@ func NewClient(sessionToken string, proxy string, model string, openSerch bool) 
 		"priority":        "u=1, i",
 		"referer":         "https://www.perplexity.ai/",
 	}
-
 	for key, value := range headers {
 		client.SetCommonHeader(key, value)
 	}
-
-	// Set cookies
 	if sessionToken != "" {
 		client.SetCommonCookies(&http.Cookie{
 			Name:  "__Secure-next-auth.session-token",
 			Value: sessionToken,
 		})
 	}
-
-	// Create client with visitor ID
-	c := &Client{
+	return &Client{
 		sessionToken: sessionToken,
 		client:       client,
 		Model:        model,
 		Attachments:  []string{},
 		OpenSerch:    openSerch,
 	}
-
-	return c
 }
 
-// SendMessage sends a message to Perplexity and returns the status and response
-func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc *gin.Context) (int, error) {
-	// Create request body
-	requestBody := PerplexityRequest{
+// redactToken masks a session token for safe logging (shows first 8 chars only)
+func redactToken(token string) string {
+	if len(token) <= 8 {
+		return "[REDACTED]"
+	}
+	return token[:8] + "...[REDACTED]"
+}
+
+// buildRequestBody constructs a PerplexityRequest to avoid duplication
+func (c *Client) buildRequestBody(message string, isIncognito bool) PerplexityRequest {
+	body := PerplexityRequest{
 		Params: PerplexityParams{
-			Attachments: c.Attachments,
-			Language:    "en-US",
-			Timezone:    "America/New_York",
-			SearchFocus: "writing",
-			Sources:     []string{},
+			Attachments:             c.Attachments,
+			Language:                "en-US",
+			Timezone:                "America/New_York",
+			SearchFocus:             "writing",
+			Sources:                 []string{},
 			SearchRecencyFilter:     nil,
 			FrontendUUID:            uuid.New().String(),
 			Mode:                    "copilot",
@@ -179,7 +178,7 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 			PromptSource:            "user",
 			QuerySource:             "home",
 			BrowserHistorySummary:   []interface{}{},
-			IsIncognito:             is_incognito,
+			IsIncognito:             isIncognito,
 			UseSchematizedAPI:       true,
 			SendBackTextInStreaming: false,
 			SupportedBlockUseCases: []string{
@@ -203,83 +202,40 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 		QueryStr: message,
 	}
 	if c.OpenSerch {
-		requestBody.Params.SearchFocus = "internet"
-		requestBody.Params.Sources = append(requestBody.Params.Sources, "web")
+		body.Params.SearchFocus = "internet"
+		body.Params.Sources = append(body.Params.Sources, "web")
 	}
-	logger.Info(fmt.Sprintf("Perplexity request body: %v", requestBody))
-	// Make the request
+	return body
+}
+
+// SendMessage sends a message to Perplexity and streams or returns the response
+func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc *gin.Context) (int, error) {
+	requestBody := c.buildRequestBody(message, is_incognito)
+	logger.Info(fmt.Sprintf("Perplexity request: model=%s search=%v incognito=%v session=%s",
+		c.Model, c.OpenSerch, is_incognito, redactToken(c.sessionToken)))
+
 	resp, err := c.client.R().DisableAutoReadResponse().
 		SetBody(requestBody).
 		Post("https://www.perplexity.ai/rest/sse/perplexity_ask")
-
 	if err != nil {
 		logger.Error(fmt.Sprintf("Error sending request: %v", err))
 		return 500, fmt.Errorf("request failed: %w", err)
 	}
-
 	logger.Info(fmt.Sprintf("Perplexity response status code: %d", resp.StatusCode))
-
 	if resp.StatusCode == http.StatusTooManyRequests {
 		resp.Body.Close()
 		return http.StatusTooManyRequests, fmt.Errorf("rate limit exceeded")
 	}
-
 	if resp.StatusCode != http.StatusOK {
-		logger.Error(fmt.Sprintf("Unexpected return data: %s", resp.String()))
+		logger.Error(fmt.Sprintf("Unexpected status: %d", resp.StatusCode))
 		resp.Body.Close()
 		return resp.StatusCode, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
-
 	return 200, c.HandleResponse(resp.Body, stream, gc)
 }
 
 func (c *Client) SendMessageCollect(message string, is_incognito bool) (string, error) {
-	requestBody := PerplexityRequest{
-		Params: PerplexityParams{
-			Attachments: c.Attachments,
-			Language:    "en-US",
-			Timezone:    "America/New_York",
-			SearchFocus: "writing",
-			Sources:     []string{},
-			SearchRecencyFilter:     nil,
-			FrontendUUID:            uuid.New().String(),
-			Mode:                    "copilot",
-			ModelPreference:         c.Model,
-			IsRelatedQuery:          false,
-			IsSponsored:             false,
-			VisitorID:               uuid.New().String(),
-			UserNextauthID:          uuid.New().String(),
-			FrontendContextUUID:     uuid.New().String(),
-			PromptSource:            "user",
-			QuerySource:             "home",
-			BrowserHistorySummary:   []interface{}{},
-			IsIncognito:             is_incognito,
-			UseSchematizedAPI:       true,
-			SendBackTextInStreaming: false,
-			SupportedBlockUseCases: []string{
-				"answer_modes",
-				"media_items",
-				"knowledge_cards",
-				"inline_entity_cards",
-				"place_widgets",
-				"finance_widgets",
-				"sports_widgets",
-				"shopping_widgets",
-				"jobs_widgets",
-				"search_result_widgets",
-				"entity_list_answer",
-				"todo_list",
-			},
-			ClientCoordinates:        nil,
-			IsNavSuggestionsDisabled: false,
-			Version:                  "2.18",
-		},
-		QueryStr: message,
-	}
-	if c.OpenSerch {
-		requestBody.Params.SearchFocus = "internet"
-		requestBody.Params.Sources = append(requestBody.Params.Sources, "web")
-	}
+	requestBody := c.buildRequestBody(message, is_incognito)
 	resp, err := c.client.R().DisableAutoReadResponse().
 		SetBody(requestBody).
 		Post("https://www.perplexity.ai/rest/sse/perplexity_ask")
@@ -293,24 +249,18 @@ func (c *Client) SendMessageCollect(message string, is_incognito bool) (string, 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
-	text, err := c.collectResponse(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	return text, nil
+	return c.collectResponse(resp.Body)
 }
 
-func (c *Client) DetermineToolCall(userMessage string, tools []ToolDefinition) (*ToolCallInfo, error) {
+// DetermineToolCalls sends a meta-prompt and returns a list of tool calls (supports parallel).
+func (c *Client) DetermineToolCalls(userMessage string, tools []ToolDefinition) ([]ToolCallInfo, error) {
 	prompt := BuildToolSelectionPrompt(userMessage, tools)
 	text, err := c.SendMessageCollect(prompt, true)
 	if err != nil {
 		return nil, err
 	}
-	tc := ParseToolSelectionJSON(text)
-	if tc == nil {
-		return nil, nil
-	}
-	return tc, nil
+	result := ParseToolSelectionJSON(text)
+	return result, nil
 }
 
 func (c *Client) collectResponse(body io.ReadCloser) (string, error) {
@@ -376,7 +326,6 @@ func (c *Client) collectResponse(body io.ReadCloser) (string, error) {
 
 func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context) error {
 	defer body.Close()
-	// Set headers for streaming
 	if stream {
 		gc.Writer.Header().Set("Content-Type", "text/event-stream")
 		gc.Writer.Header().Set("Cache-Control", "no-cache")
@@ -384,7 +333,6 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 		gc.Writer.WriteHeader(http.StatusOK)
 		gc.Writer.Flush()
 	}
-	// Use bufio.Reader instead of bufio.Scanner for better UTF-8 handling
 	reader := bufio.NewReaderSize(body, 1024*1024)
 	clientDone := gc.Request.Context().Done()
 	full_text := ""
@@ -398,7 +346,6 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 			return nil
 		default:
 		}
-
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
@@ -408,7 +355,6 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 			break
 		}
 		line = strings.TrimRight(line, "\r\n")
-		// Skip empty lines
 		if line == "" {
 			continue
 		}
@@ -421,7 +367,6 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 			logger.Error(fmt.Sprintf("Error parsing JSON: %v", err))
 			continue
 		}
-		// Check for completion and web results
 		if response.Status == "COMPLETED" {
 			final = true
 			for _, block := range response.Blocks {
@@ -431,13 +376,11 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 					for i, result := range block.ImageModeBlock.MediaItems {
 						imageResultsText += utils.ImageShow(i, result.Name, result.Image)
 						imageModelList = append(imageModelList, result.Name)
-
 					}
 					if len(imageModelList) > 0 {
 						imageResultsText = imageResultsText + "\n\n---\n" + strings.Join(imageModelList, ", ")
 					}
 					full_text += imageResultsText
-
 					if stream {
 						model.ReturnOpenAIResponse(imageResultsText, stream, gc)
 					}
@@ -450,38 +393,34 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 						webResultsText += "\n\n" + utils.SearchShow(i, result.Name, result.URL, result.Snippet)
 					}
 					full_text += webResultsText
-
 					if stream {
 						model.ReturnOpenAIResponse(webResultsText, stream, gc)
 					}
 				}
-
 			}
-
+			// Model drift detection: warn and include notice in output
 			if !config.ConfigInstance.IgnoreModelMonitoring && response.DisplayModel != c.Model {
 				res_text := "\n\n---\n"
-				res_text += fmt.Sprintf("Display Model: %s\n", config.ModelReverseMapGet(response.DisplayModel, response.DisplayModel))
+				res_text += fmt.Sprintf("⚠️ Model drift: requested %s but Perplexity used %s\n",
+					c.Model,
+					config.ModelReverseMapGet(response.DisplayModel, response.DisplayModel))
+				logger.Warn(fmt.Sprintf("Model drift detected: requested=%s actual=%s", c.Model, response.DisplayModel))
 				full_text += res_text
-				if !stream {
-					break
+				if stream {
+					model.ReturnOpenAIResponse(res_text, stream, gc)
 				}
-				model.ReturnOpenAIResponse(res_text, stream, gc)
 			}
 		}
 		if final {
 			break
 		}
-		// Process each block in the response
 		for _, block := range response.Blocks {
-			// Handle reasoning plan blocks (thinking)
 			if block.ReasoningPlanBlock != nil && len(block.ReasoningPlanBlock.Goals) > 0 {
-
 				res_text := ""
 				if !inThinking && !thinkShown {
 					res_text += "<think>"
 					inThinking = true
 				}
-
 				for _, goal := range block.ReasoningPlanBlock.Goals {
 					if goal.Description != "" && goal.Description != "Beginning analysis" && goal.Description != "Wrapping up analysis" {
 						res_text += goal.Description
@@ -514,21 +453,16 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 				model.ReturnOpenAIResponse(res_text, stream, gc)
 			}
 		}
-
 	}
-
 	if !stream {
 		model.ReturnOpenAIResponse(full_text, stream, gc)
 	} else {
-		// Send end marker for streaming mode
 		gc.Writer.Write([]byte("data: [DONE]\n\n"))
 		gc.Writer.Flush()
 	}
-
 	return nil
 }
 
-// UploadURLResponse represents the response from the create_upload_url endpoint
 type UploadURLResponse struct {
 	S3BucketURL string               `json:"s3_bucket_url"`
 	S3ObjectURL string               `json:"s3_object_url"`
@@ -556,7 +490,6 @@ type CloudinaryUploadInfo struct {
 	ACL               string `json:"acl"`
 }
 
-// UploadFile is a placeholder for file upload functionality
 func (c *Client) createUploadURL(filename string, contentType string) (*UploadURLResponse, error) {
 	requestBody := map[string]interface{}{
 		"filename":     filename,
@@ -573,11 +506,10 @@ func (c *Client) createUploadURL(filename string, contentType string) (*UploadUR
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		logger.Error(fmt.Sprintf("Image Upload with status code %d: %s", resp.StatusCode, resp.String()))
+		logger.Error(fmt.Sprintf("Image Upload with status code %d", resp.StatusCode))
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 	var uploadURLResponse UploadURLResponse
-	logger.Info(fmt.Sprintf("Create upload with status code %d: %s", resp.StatusCode, resp.String()))
 	if err := json.Unmarshal(resp.Bytes(), &uploadURLResponse); err != nil {
 		logger.Error(fmt.Sprintf("Error unmarshalling upload URL response: %v", err))
 		return nil, err
@@ -587,26 +519,17 @@ func (c *Client) createUploadURL(filename string, contentType string) (*UploadUR
 		return nil, fmt.Errorf("rate limit exceeded")
 	}
 	return &uploadURLResponse, nil
-
 }
 
 func (c *Client) UploadImage(img_list []string) error {
-	logger.Info(fmt.Sprintf("Uploading %d images to Cloudinary", len(img_list)))
-
-	// Upload images to Cloudinary
+	logger.Info(fmt.Sprintf("Uploading %d images", len(img_list)))
 	for _, img := range img_list {
 		filename := utils.RandomString(5) + ".jpg"
-		// Create upload URL
 		uploadURLResponse, err := c.createUploadURL(filename, "image/jpeg")
 		if err != nil {
-			logger.Error(fmt.Sprintf("Error creating upload URL: %v", err))
 			return err
 		}
-		logger.Info(fmt.Sprintf("Upload URL response: %v", uploadURLResponse))
-		// Upload image to Cloudinary
-		err = c.UloadFileToCloudinary(uploadURLResponse.Fields, "img", img, filename)
-		if err != nil {
-			logger.Error(fmt.Sprintf("Error uploading image: %v", err))
+		if err := c.UloadFileToCloudinary(uploadURLResponse.Fields, "img", img, filename); err != nil {
 			return err
 		}
 	}
@@ -614,21 +537,18 @@ func (c *Client) UploadImage(img_list []string) error {
 }
 
 func (c *Client) UloadFileToCloudinary(uploadInfo CloudinaryUploadInfo, contentType string, filedata string, filename string) error {
-	if len(filedata) > 100 {
-		logger.Info(fmt.Sprintf("filedata: %s ……", filedata[:50]))
-	}
-	logger.Info(fmt.Sprintf("Uploading file %s to Cloudinary", filename))
+	logger.Info(fmt.Sprintf("Uploading file %s to storage", filename))
 	var formFields map[string]string
 	if contentType == "img" {
 		formFields = map[string]string{
-			"signature":             uploadInfo.Signature,
-			"key":                   uploadInfo.Key,
-			"tagging":               uploadInfo.Tagging,
-			"AWSAccessKeyId":        uploadInfo.AWSAccessKeyId,
-			"policy":                uploadInfo.Policy,
-			"x-amz-security-token":  uploadInfo.Xamzsecuritytoken,
-			"acl":                   uploadInfo.ACL,
-			"Content-Type":          "image/jpeg",
+			"signature":            uploadInfo.Signature,
+			"key":                  uploadInfo.Key,
+			"tagging":              uploadInfo.Tagging,
+			"AWSAccessKeyId":       uploadInfo.AWSAccessKeyId,
+			"policy":               uploadInfo.Policy,
+			"x-amz-security-token": uploadInfo.Xamzsecuritytoken,
+			"acl":                  uploadInfo.ACL,
+			"Content-Type":         "image/jpeg",
 		}
 	} else {
 		formFields = map[string]string{
@@ -646,65 +566,44 @@ func (c *Client) UloadFileToCloudinary(uploadInfo CloudinaryUploadInfo, contentT
 	writer := multipart.NewWriter(&requestBody)
 	for key, value := range formFields {
 		if err := writer.WriteField(key, value); err != nil {
-			logger.Error(fmt.Sprintf("Error writing form field %s: %v", key, err))
 			return err
 		}
 	}
-
 	decodedData, err := base64.StdEncoding.DecodeString(filedata)
 	if err != nil {
-		logger.Error(fmt.Sprintf("Error decoding base64 data: %v", err))
 		return err
 	}
-
 	part, err := writer.CreateFormFile("file", filename)
 	if err != nil {
-		logger.Error(fmt.Sprintf("Error creating form file: %v", err))
 		return err
 	}
-
 	if _, err := part.Write(decodedData); err != nil {
-		logger.Error(fmt.Sprintf("Error writing file data: %v", err))
 		return err
 	}
 	if err := writer.Close(); err != nil {
-		logger.Error(fmt.Sprintf("Error closing writer: %v", err))
 		return err
 	}
-
-	var uploadURL = "https://ppl-ai-file-upload.s3.amazonaws.com/"
-
 	resp, err := c.client.R().
 		SetHeader("Content-Type", writer.FormDataContentType()).
 		SetBodyBytes(requestBody.Bytes()).
-		Post(uploadURL)
-
+		Post("https://ppl-ai-file-upload.s3.amazonaws.com/")
 	if err != nil {
-		logger.Error(fmt.Sprintf("Error uploading file: %v", err))
 		return err
 	}
-	logger.Info(fmt.Sprintf("Image Upload with status code %d: %s", resp.StatusCode, resp.String()))
+	logger.Info(fmt.Sprintf("File upload status: %d", resp.StatusCode))
 	c.Attachments = append(c.Attachments, "https://ppl-ai-file-upload.s3.amazonaws.com/"+uploadInfo.Key)
 	return nil
 }
 
 func (c *Client) UploadText(context string) error {
-	logger.Info("Uploading txt to AWS")
+	logger.Info("Uploading text context to storage")
 	filedata := base64.StdEncoding.EncodeToString([]byte(context))
 	filename := utils.RandomString(5) + ".txt"
 	uploadURLResponse, err := c.createUploadURL(filename, "text/plain")
 	if err != nil {
-		logger.Error(fmt.Sprintf("Error creating upload URL: %v", err))
 		return err
 	}
-	logger.Info(fmt.Sprintf("Upload URL response: %v", uploadURLResponse))
-	err = c.UloadFileToCloudinary(uploadURLResponse.Fields, "txt", filedata, filename)
-	if err != nil {
-		logger.Error(fmt.Sprintf("Error uploading image: %v", err))
-		return err
-	}
-
-	return nil
+	return c.UloadFileToCloudinary(uploadURLResponse.Fields, "txt", filedata, filename)
 }
 
 func (c *Client) GetNewCookie() (string, error) {
@@ -714,7 +613,6 @@ func (c *Client) GetNewCookie() (string, error) {
 		return "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		logger.Error(fmt.Sprintf("Error getting session cookie: %s", resp.String()))
 		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 	for _, cookie := range resp.Cookies() {
