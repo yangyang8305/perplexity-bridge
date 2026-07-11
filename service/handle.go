@@ -45,7 +45,7 @@ func ChatCompletionsHandler(c *gin.Context) {
 
 	m := req.Model
 	if m == "" {
-		m = "claude-3.7-sonnet"
+		m = "claude-4.6-sonnet"
 	}
 	if idx := strings.LastIndex(m, "/"); idx >= 0 {
 		m = m[idx+1:]
@@ -77,10 +77,12 @@ func ChatCompletionsHandler(c *gin.Context) {
 			continue
 		}
 		if role == "tool" {
-			// Tool results: include tool_call_id so the model knows which call this answers
+			// Perplexity does not understand the OpenAI tool role natively.
+			// Inject tool results as a user-visible context block so the model
+			// can synthesise the final answer from them.
 			toolCallID := core.ExtractToolCallID(msg)
 			content, _ := msg["content"].(string)
-			prompt.WriteString(fmt.Sprintf("Tool Result (call_id=%s):\n%s\n\n", toolCallID, content))
+			prompt.WriteString(fmt.Sprintf("[Tool result for call %s]\n%s\n\n", toolCallID, content))
 			continue
 		}
 		if role == "assistant" {
@@ -214,13 +216,21 @@ func ChatCompletionsHandler(c *gin.Context) {
 				}
 			}
 		} else if hasTools && hasToolResults {
-			// Round 2: tool results are in the prompt, get final answer
-			text, err := pplxClient.SendMessageCollect(prompt.String(), config.ConfigInstance.IsIncognito)
-			if err != nil {
-				logger.Error(fmt.Sprintf("Failed to send tool result message: %v", err))
-				continue
+			// Round 2: tool results are inlined as context in the prompt; get final answer.
+			// Use streaming path when client requested it.
+			if req.Stream {
+				if statusCode, err := pplxClient.SendMessage(prompt.String(), true, config.ConfigInstance.IsIncognito, c); err != nil {
+					logger.Error(fmt.Sprintf("Failed to send tool result message (stream): status=%d err=%v", statusCode, err))
+					continue
+				}
+			} else {
+				text, err := pplxClient.SendMessageCollect(prompt.String(), config.ConfigInstance.IsIncognito)
+				if err != nil {
+					logger.Error(fmt.Sprintf("Failed to send tool result message: %v", err))
+					continue
+				}
+				model.ReturnOpenAIResponse(text, req.Stream, c)
 			}
-			model.ReturnOpenAIResponse(text, req.Stream, c)
 		} else {
 			if _, err := pplxClient.SendMessage(prompt.String(), req.Stream, config.ConfigInstance.IsIncognito, c); err != nil {
 				logger.Error(fmt.Sprintf("Failed to send message: %v", err))

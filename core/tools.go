@@ -95,113 +95,114 @@ func GetLastUserMessage(messages []map[string]interface{}) string {
 	return ""
 }
 
-// BuildToolSelectionPrompt builds a meta-prompt asking the model which tools to call.
-// Supports parallel tool calls by asking for a JSON array.
+// BuildToolSelectionPrompt constructs a meta-prompt that includes the full JSON
+// schema (required fields, types, descriptions) for each tool so the model can
+// infer correct argument values. It asks for a JSON array to support parallel
+// tool calls; single-function legacy format is still accepted by the parser.
 func BuildToolSelectionPrompt(userMessage string, tools []ToolDefinition) string {
 	var sb strings.Builder
-	sb.WriteString("You are a function selection system. Output ONLY valid JSON.\n\n")
+	sb.WriteString("You are a function selection system. Output ONLY valid JSON, no markdown, no explanation.\n\n")
 	sb.WriteString(fmt.Sprintf("User request: \"%s\"\n\n", userMessage))
-	sb.WriteString("Available functions:\n")
+	sb.WriteString("Available functions (with full JSON Schema):\n")
 	for _, tool := range tools {
-		sb.WriteString(fmt.Sprintf("- %s", tool.Function.Name))
+		sb.WriteString(fmt.Sprintf("\n### %s\n", tool.Function.Name))
 		if tool.Function.Description != "" {
-			sb.WriteString(fmt.Sprintf(": %s", tool.Function.Description))
+			sb.WriteString(fmt.Sprintf("Description: %s\n", tool.Function.Description))
 		}
-		sb.WriteString("\n")
-		if params, ok := tool.Function.Parameters["properties"].(map[string]interface{}); ok {
-			requiredSet := map[string]bool{}
-			if reqList, ok := tool.Function.Parameters["required"].([]interface{}); ok {
-				for _, r := range reqList {
-					if s, ok := r.(string); ok {
-						requiredSet[s] = true
-					}
-				}
-			}
-			for paramName, paramInfo := range params {
-				if paramMap, ok := paramInfo.(map[string]interface{}); ok {
-					paramType, _ := paramMap["type"].(string)
-					paramDesc, _ := paramMap["description"].(string)
-					requiredMark := ""
-					if requiredSet[paramName] {
-						requiredMark = " [required]"
-					}
-					// Include enum values if present
-					enumHint := ""
-					if enumVals, ok := paramMap["enum"].([]interface{}); ok && len(enumVals) > 0 {
-						enumStrs := make([]string, 0, len(enumVals))
-						for _, e := range enumVals {
-							enumStrs = append(enumStrs, fmt.Sprintf("%v", e))
-						}
-						enumHint = fmt.Sprintf(" (one of: %s)", strings.Join(enumStrs, ", "))
-					}
-					sb.WriteString(fmt.Sprintf("  %s (%s%s)%s: %s\n", paramName, paramType, enumHint, requiredMark, paramDesc))
-				}
+		if len(tool.Function.Parameters) > 0 {
+			schemaBytes, err := json.MarshalIndent(tool.Function.Parameters, "", "  ")
+			if err == nil {
+				sb.WriteString(fmt.Sprintf("Parameters schema:\n%s\n", string(schemaBytes)))
 			}
 		}
 	}
 	sb.WriteString("\nRules:\n")
-	sb.WriteString("- You MAY call multiple functions in parallel if the request requires it\n")
-	sb.WriteString("- If the request involves reading/listing/searching files or directories, select the appropriate function\n")
-	sb.WriteString("- If the request involves writing/creating/modifying files, select the appropriate function\n")
-	sb.WriteString("- If the request is a simple conversation, question, or greeting, respond with []\n")
-	sb.WriteString("- The request may be in any language; match intent, not exact words\n\n")
-	sb.WriteString("Respond with ONLY a JSON array (even for a single call):\n")
-	sb.WriteString("[{\"function\":\"tool_name\",\"arguments\":{\"param1\":\"value1\"}}]\n")
-	sb.WriteString("If no function is needed: []\n")
+	sb.WriteString("- You MAY call multiple functions in parallel when needed.\n")
+	sb.WriteString("- Fill ALL required parameters; use null only when the schema explicitly allows it.\n")
+	sb.WriteString("- The request may be in any language; match intent, not exact words.\n")
+	sb.WriteString("- If NO function is needed, respond with: {\"functions\": []}\n\n")
+	sb.WriteString("Respond with ONLY this JSON format:\n")
+	sb.WriteString("{\"functions\": [{\"name\": \"tool_name\", \"arguments\": {\"param1\": \"value1\"}}]}\n")
+	sb.WriteString("For a single call: {\"functions\": [{\"name\": \"read_file\", \"arguments\": {\"path\": \"/foo/bar.go\"}}]}\n")
+	sb.WriteString("For parallel calls: {\"functions\": [{\"name\": \"read_file\", \"arguments\": {\"path\": \"a.go\"}}, {\"name\": \"read_file\", \"arguments\": {\"path\": \"b.go\"}}]}\n")
 	return sb.String()
 }
 
-// ParseToolSelectionJSON parses the model response into a list of ToolCallInfo.
-// Supports both array format (new) and legacy single-object format for backward compat.
-func ParseToolSelectionJSON(text string) []ToolCallInfo {
-	// Try array format first
-	arrayStart := strings.Index(text, "[")
-	arrayEnd := strings.LastIndex(text, "]")
-	if arrayStart >= 0 && arrayEnd > arrayStart {
-		jsonPart := text[arrayStart : arrayEnd+1]
-		var rawList []struct {
-			Function  string                 `json:"function"`
-			Arguments map[string]interface{} `json:"arguments"`
-		}
-		if err := json.Unmarshal([]byte(jsonPart), &rawList); err == nil {
-			result := make([]ToolCallInfo, 0, len(rawList))
-			for _, raw := range rawList {
-				if raw.Function == "" || raw.Function == "none" {
-					continue
-				}
-				argsBytes, _ := json.Marshal(raw.Arguments)
-				result = append(result, ToolCallInfo{
-					ID:   "call_" + uuid.New().String()[:12],
-					Type: "function",
-					Function: FunctionCallInfo{
-						Name:      raw.Function,
-						Arguments: string(argsBytes),
-					},
-				})
+// ParseToolSelectionJSONMulti parses the model response and returns zero or more
+// ToolCallInfo values, supporting both the new array format and the legacy
+// single-function format for backward compatibility.
+func ParseToolSelectionJSONMulti(text string) []ToolCallInfo {
+	start := strings.Index(text, "{")
+	if start < 0 {
+		return nil
+	}
+	// Find the matching closing brace for the outermost object
+	depth := 0
+	end := -1
+	for i := start; i < len(text); i++ {
+		switch text[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				end = i
 			}
-			return result
+		}
+		if end >= 0 {
+			break
 		}
 	}
-	// Fallback: legacy single-object format {"function":"...","arguments":{...}}
-	start := strings.Index(text, "{")
-	end := strings.LastIndex(text, "}")
-	if start >= 0 && end > start {
-		jsonPart := text[start : end+1]
-		var raw struct {
-			Function  string                 `json:"function"`
+	if end < 0 {
+		return nil
+	}
+	jsonPart := text[start : end+1]
+
+	// Try new array format first: {"functions": [...]}
+	var newFmt struct {
+		Functions []struct {
+			Name      string                 `json:"name"`
 			Arguments map[string]interface{} `json:"arguments"`
-		}
-		if err := json.Unmarshal([]byte(jsonPart), &raw); err == nil && raw.Function != "" && raw.Function != "none" {
-			argsBytes, _ := json.Marshal(raw.Arguments)
-			return []ToolCallInfo{{
+		} `json:"functions"`
+	}
+	if err := json.Unmarshal([]byte(jsonPart), &newFmt); err == nil && newFmt.Functions != nil {
+		var calls []ToolCallInfo
+		for _, f := range newFmt.Functions {
+			if f.Name == "" {
+				continue
+			}
+			argsBytes, _ := json.Marshal(f.Arguments)
+			calls = append(calls, ToolCallInfo{
 				ID:   "call_" + uuid.New().String()[:12],
 				Type: "function",
 				Function: FunctionCallInfo{
-					Name:      raw.Function,
+					Name:      f.Name,
 					Arguments: string(argsBytes),
 				},
-			}}
+			})
 		}
+		return calls
 	}
+
+	// Fallback: legacy single-function format {"function": "name", "arguments": {...}}
+	var legacyFmt struct {
+		Function  string                 `json:"function"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}
+	if err := json.Unmarshal([]byte(jsonPart), &legacyFmt); err == nil {
+		if legacyFmt.Function == "" || legacyFmt.Function == "none" {
+			return nil
+		}
+		argsBytes, _ := json.Marshal(legacyFmt.Arguments)
+		return []ToolCallInfo{{
+			ID:   "call_" + uuid.New().String()[:12],
+			Type: "function",
+			Function: FunctionCallInfo{
+				Name:      legacyFmt.Function,
+				Arguments: string(argsBytes),
+			},
+		}}
+	}
+
 	return nil
 }

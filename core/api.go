@@ -259,7 +259,7 @@ func (c *Client) DetermineToolCalls(userMessage string, tools []ToolDefinition) 
 	if err != nil {
 		return nil, err
 	}
-	result := ParseToolSelectionJSON(text)
+	result := ParseToolSelectionJSONMulti(text)
 	return result, nil
 }
 
