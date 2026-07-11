@@ -33,6 +33,7 @@ func Reload() {
 	ConfigInstance.IgnoreSerchResult = os.Getenv("IGNORE_SEARCH_RESULT") == "true"
 	ConfigInstance.IgnoreModelMonitoring = os.Getenv("IGNORE_MODEL_MONITORING") == "true"
 	ConfigInstance.IsMaxSubscribe = os.Getenv("IS_MAX_SUBSCRIBE") == "true"
+	ConfigInstance.Timezone = os.Getenv("TIMEZONE") // Fix #7
 	ConfigInstance.RwMutex.Unlock()
 	logger.Info(fmt.Sprintf("Config reloaded: sessions=%d", retryCount))
 }

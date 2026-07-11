@@ -24,6 +24,7 @@ import (
 // Client represents a Perplexity API client
 type Client struct {
 	sessionToken string
+	visitorID    string // fixed per-session to avoid fingerprint churn (#6)
 	client       *req.Client
 	Model        string
 	Attachments  []string
@@ -113,8 +114,11 @@ type ImageModeBlock struct {
 	} `json:"media_items"`
 }
 
+// pplxVersion is the Perplexity web client version sent in all requests. (#5)
+const pplxVersion = "2.18"
+
 // NewClient creates a new Perplexity API client
-func NewClient(sessionToken string, proxy string, model string, openSerch bool) *Client {
+func NewClient(sessionToken string, proxy string, mdl string, openSerch bool) *Client {
 	client := req.C().SetTimeout(time.Minute * 10)
 	client.Transport.SetResponseHeaderTimeout(time.Second * 10)
 	if proxy != "" {
@@ -140,16 +144,21 @@ func NewClient(sessionToken string, proxy string, model string, openSerch bool) 
 			Value: sessionToken,
 		})
 	}
+
+	// Fix #6: stable visitorID per Client instance
+	visitorID := uuid.New().String()
+
 	return &Client{
 		sessionToken: sessionToken,
+		visitorID:    visitorID,
 		client:       client,
-		Model:        model,
+		Model:        mdl,
 		Attachments:  []string{},
 		OpenSerch:    openSerch,
 	}
 }
 
-// redactToken masks a session token for safe logging (shows first 8 chars only)
+// redactToken masks a session token for safe logging
 func redactToken(token string) string {
 	if len(token) <= 8 {
 		return "[REDACTED]"
@@ -157,30 +166,46 @@ func redactToken(token string) string {
 	return token[:8] + "...[REDACTED]"
 }
 
-// buildRequestBody constructs a PerplexityRequest to avoid duplication
-func (c *Client) buildRequestBody(message string, isIncognito bool) PerplexityRequest {
-	body := PerplexityRequest{
+// timezone returns the configured timezone or falls back to America/New_York. (#7)
+func timezone() string {
+	if tz := config.ConfigInstance.Timezone; tz != "" {
+		return tz
+	}
+	return "America/New_York"
+}
+
+// buildRequestBody constructs a PerplexityRequest
+func (c *Client) buildRequestBody(message string, isIncognito bool, stream bool) PerplexityRequest {
+	// Fix #8: correct SearchFocus per mode
+	searchFocus := "writing"
+	sources := []string{}
+	if c.OpenSerch {
+		searchFocus = "internet"
+		sources = append(sources, "web")
+	}
+
+	return PerplexityRequest{
 		Params: PerplexityParams{
 			Attachments:             c.Attachments,
 			Language:                "en-US",
-			Timezone:                "America/New_York",
-			SearchFocus:             "writing",
-			Sources:                 []string{},
+			Timezone:                timezone(),
+			SearchFocus:             searchFocus,
+			Sources:                 sources,
 			SearchRecencyFilter:     nil,
 			FrontendUUID:            uuid.New().String(),
 			Mode:                    "copilot",
 			ModelPreference:         c.Model,
 			IsRelatedQuery:          false,
 			IsSponsored:             false,
-			VisitorID:               uuid.New().String(),
-			UserNextauthID:          uuid.New().String(),
+			VisitorID:               c.visitorID, // Fix #6
+			UserNextauthID:          c.visitorID, // Fix #6
 			FrontendContextUUID:     uuid.New().String(),
 			PromptSource:            "user",
 			QuerySource:             "home",
 			BrowserHistorySummary:   []interface{}{},
 			IsIncognito:             isIncognito,
 			UseSchematizedAPI:       true,
-			SendBackTextInStreaming: false,
+			SendBackTextInStreaming: stream, // Fix #2
 			SupportedBlockUseCases: []string{
 				"answer_modes",
 				"media_items",
@@ -197,20 +222,15 @@ func (c *Client) buildRequestBody(message string, isIncognito bool) PerplexityRe
 			},
 			ClientCoordinates:        nil,
 			IsNavSuggestionsDisabled: false,
-			Version:                  "2.18",
+			Version:                  pplxVersion, // Fix #5
 		},
 		QueryStr: message,
 	}
-	if c.OpenSerch {
-		body.Params.SearchFocus = "internet"
-		body.Params.Sources = append(body.Params.Sources, "web")
-	}
-	return body
 }
 
 // SendMessage sends a message to Perplexity and streams or returns the response
 func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc *gin.Context) (int, error) {
-	requestBody := c.buildRequestBody(message, is_incognito)
+	requestBody := c.buildRequestBody(message, is_incognito, stream)
 	logger.Info(fmt.Sprintf("Perplexity request: model=%s search=%v incognito=%v session=%s",
 		c.Model, c.OpenSerch, is_incognito, redactToken(c.sessionToken)))
 
@@ -235,7 +255,7 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 }
 
 func (c *Client) SendMessageCollect(message string, is_incognito bool) (string, error) {
-	requestBody := c.buildRequestBody(message, is_incognito)
+	requestBody := c.buildRequestBody(message, is_incognito, false)
 	resp, err := c.client.R().DisableAutoReadResponse().
 		SetBody(requestBody).
 		Post("https://www.perplexity.ai/rest/sse/perplexity_ask")
@@ -252,15 +272,14 @@ func (c *Client) SendMessageCollect(message string, is_incognito bool) (string, 
 	return c.collectResponse(resp.Body)
 }
 
-// DetermineToolCalls sends a meta-prompt and returns a list of tool calls (supports parallel).
+// DetermineToolCalls sends a meta-prompt and returns a list of tool calls.
 func (c *Client) DetermineToolCalls(userMessage string, tools []ToolDefinition) ([]ToolCallInfo, error) {
 	prompt := BuildToolSelectionPrompt(userMessage, tools)
 	text, err := c.SendMessageCollect(prompt, true)
 	if err != nil {
 		return nil, err
 	}
-	result := ParseToolSelectionJSONMulti(text)
-	return result, nil
+	return ParseToolSelectionJSONMulti(text), nil
 }
 
 func (c *Client) collectResponse(body io.ReadCloser) (string, error) {
@@ -287,6 +306,10 @@ func (c *Client) collectResponse(body io.ReadCloser) (string, error) {
 			continue
 		}
 		if response.Status == "COMPLETED" {
+			// Fix #3: always close <think> if still open
+			if inThinking {
+				full_text += "</think>\n\n"
+			}
 			break
 		}
 		for _, block := range response.Blocks {
@@ -355,10 +378,7 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 			break
 		}
 		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			continue
-		}
-		if !strings.HasPrefix(line, "data: ") {
+		if line == "" || !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 		data := line[6:]
@@ -369,6 +389,15 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 		}
 		if response.Status == "COMPLETED" {
 			final = true
+			// Fix #3: always close <think> if still open
+			if inThinking {
+				closeTag := "</think>\n\n"
+				full_text += closeTag
+				if stream {
+					model.ReturnOpenAIResponse(closeTag, stream, gc)
+				}
+				inThinking = false
+			}
 			for _, block := range response.Blocks {
 				if block.ImageModeBlock != nil && block.ImageModeBlock.Progress == "DONE" && len(block.ImageModeBlock.MediaItems) > 0 {
 					imageResultsText := ""
@@ -398,17 +427,10 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 					}
 				}
 			}
-			// Model drift detection: warn and include notice in output
+			// Fix #4: model drift only logged, never appended to response
 			if !config.ConfigInstance.IgnoreModelMonitoring && response.DisplayModel != c.Model {
-				res_text := "\n\n---\n"
-				res_text += fmt.Sprintf("⚠️ Model drift: requested %s but Perplexity used %s\n",
-					c.Model,
-					config.ModelReverseMapGet(response.DisplayModel, response.DisplayModel))
-				logger.Warn(fmt.Sprintf("Model drift detected: requested=%s actual=%s", c.Model, response.DisplayModel))
-				full_text += res_text
-				if stream {
-					model.ReturnOpenAIResponse(res_text, stream, gc)
-				}
+				logger.Warn(fmt.Sprintf("Model drift: requested=%s actual=%s",
+					c.Model, config.ModelReverseMapGet(response.DisplayModel, response.DisplayModel)))
 			}
 		}
 		if final {
@@ -427,10 +449,9 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 					}
 				}
 				full_text += res_text
-				if !stream {
-					continue
+				if stream {
+					model.ReturnOpenAIResponse(res_text, stream, gc)
 				}
-				model.ReturnOpenAIResponse(res_text, stream, gc)
 			}
 		}
 		for _, block := range response.Blocks {
@@ -447,10 +468,9 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 					}
 				}
 				full_text += res_text
-				if !stream {
-					continue
+				if stream {
+					model.ReturnOpenAIResponse(res_text, stream, gc)
 				}
-				model.ReturnOpenAIResponse(res_text, stream, gc)
 			}
 		}
 	}
@@ -500,7 +520,7 @@ func (c *Client) createUploadURL(filename string, contentType string) (*UploadUR
 	}
 	resp, err := c.client.R().
 		SetBody(requestBody).
-		Post("https://www.perplexity.ai/rest/uploads/create_upload_url?version=2.18&source=default")
+		Post("https://www.perplexity.ai/rest/uploads/create_upload_url?version=" + pplxVersion + "&source=default")
 	if err != nil {
 		logger.Error(fmt.Sprintf("Error creating upload URL: %v", err))
 		return nil, err
@@ -588,9 +608,13 @@ func (c *Client) UloadFileToCloudinary(uploadInfo CloudinaryUploadInfo, contentT
 		SetBodyBytes(requestBody.Bytes()).
 		Post("https://ppl-ai-file-upload.s3.amazonaws.com/")
 	if err != nil {
-		return err
+		return fmt.Errorf("S3 upload request failed: %w", err)
 	}
-	logger.Info(fmt.Sprintf("File upload status: %d", resp.StatusCode))
+	// Fix #1: S3 returns 204 No Content on success
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("S3 upload failed with status %d", resp.StatusCode)
+	}
+	logger.Info(fmt.Sprintf("File uploaded successfully: %s (status %d)", filename, resp.StatusCode))
 	c.Attachments = append(c.Attachments, "https://ppl-ai-file-upload.s3.amazonaws.com/"+uploadInfo.Key)
 	return nil
 }

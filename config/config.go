@@ -37,6 +37,7 @@ type Config struct {
 	IgnoreSerchResult      bool
 	IgnoreModelMonitoring  bool
 	IsMaxSubscribe         bool
+	Timezone               string // Fix #7: configurable timezone
 }
 
 // parseSessionEnv parses the SESSIONS env var (comma-separated session tokens).
@@ -52,7 +53,6 @@ func parseSessionEnv(envValue string) (int, []SessionInfo) {
 			retryCount--
 			continue
 		}
-		// Use SplitN so colons inside the token are preserved.
 		parts := strings.SplitN(pair, ":", 2)
 		sessions = append(sessions, SessionInfo{SessionKey: parts[0]})
 	}
@@ -95,10 +95,9 @@ func LoadConfig() *Config {
 		IgnoreModelMonitoring:  os.Getenv("IGNORE_MODEL_MONITORING") == "true",
 		RwMutex:               sync.RWMutex{},
 		IsMaxSubscribe:         os.Getenv("IS_MAX_SUBSCRIBE") == "true",
+		Timezone:               os.Getenv("TIMEZONE"), // Fix #7
 	}
 	if cfg.Address == "" {
-		// Default to loopback for single-user local use.
-		// Set ADDRESS=0.0.0.0:8080 explicitly for Docker / LAN.
 		cfg.Address = "127.0.0.1:8080"
 	}
 	return cfg
@@ -120,7 +119,6 @@ func init() {
 	_ = godotenv.Load()
 	Sr = &SessionRagen{Index: 0, Mutex: sync.Mutex{}}
 	ConfigInstance = LoadConfig()
-	// Log only counts and non-sensitive flags — never log session tokens or API keys.
 	logger.Info(fmt.Sprintf(
 		"Config loaded: sessions=%d address=%s incognito=%t max_history=%d no_role_prefix=%t search_compat=%t ignore_search=%t is_max=%t",
 		ConfigInstance.RetryCount, ConfigInstance.Address, ConfigInstance.IsIncognito,
