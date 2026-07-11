@@ -37,9 +37,13 @@ func ChatCompletionsHandler(c *gin.Context) {
 		return
 	}
 	if len(req.Messages) == 0 {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error: "No messages provided",
-		})
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "No messages provided"})
+		return
+	}
+
+	// Guard: refuse early if no sessions are configured (avoids panic in NextIndex / modulo-by-zero).
+	if len(config.ConfigInstance.Sessions) == 0 {
+		c.JSON(http.StatusServiceUnavailable, ErrorResponse{Error: "No SESSIONS configured"})
 		return
 	}
 
@@ -77,9 +81,8 @@ func ChatCompletionsHandler(c *gin.Context) {
 			continue
 		}
 		if role == "tool" {
-			// Perplexity does not understand the OpenAI tool role natively.
-			// Inject tool results as a user-visible context block so the model
-			// can synthesise the final answer from them.
+			// Perplexity does not have an OpenAI-style "tool" role.
+			// Inject results as a labelled context block so the model can use them.
 			toolCallID := core.ExtractToolCallID(msg)
 			content, _ := msg["content"].(string)
 			prompt.WriteString(fmt.Sprintf("[Tool result for call %s]\n%s\n\n", toolCallID, content))
@@ -173,7 +176,7 @@ func ChatCompletionsHandler(c *gin.Context) {
 			logger.Error(fmt.Sprintf("Failed to get session for model %s: %v", m, err))
 			continue
 		}
-		logger.Info(fmt.Sprintf("Using session for model %s (index=%d)", m, index))
+		logger.Info(fmt.Sprintf("Using session index=%d model=%s", index, m))
 		pplxClient = core.NewClient(session.SessionKey, config.ConfigInstance.Proxy, m, openSearch)
 
 		if len(img_data_list) > 0 {
@@ -192,11 +195,11 @@ func ChatCompletionsHandler(c *gin.Context) {
 		}
 
 		if hasTools && !hasToolResults {
-			// Round 1: determine which tool(s) to call (supports parallel)
+			// Round 1: decide which tool(s) to call.
 			userMsg := core.GetLastUserMessage(req.Messages)
 			toolCalls, err := pplxClient.DetermineToolCalls(userMsg, toolDefs)
 			if err != nil {
-				logger.Error(fmt.Sprintf("Tool determination failed: %v, falling back to normal answer", err))
+				logger.Error(fmt.Sprintf("Tool determination failed: %v — falling back to direct answer", err))
 				if _, err := pplxClient.SendMessage(prompt.String(), req.Stream, config.ConfigInstance.IsIncognito, c); err != nil {
 					logger.Error(fmt.Sprintf("Fallback send failed: %v", err))
 					continue
@@ -205,28 +208,32 @@ func ChatCompletionsHandler(c *gin.Context) {
 			}
 			if len(toolCalls) > 0 {
 				for _, tc := range toolCalls {
-					logger.Info(fmt.Sprintf("Tool call: %s(%s)", tc.Function.Name, tc.Function.Arguments))
+					logger.Info(fmt.Sprintf("Tool call: %s args=%s", tc.Function.Name, tc.Function.Arguments))
 				}
-				model.ReturnToolCallsResponse(toolCalls, req.Stream, c)
+				// Convert to raw [id, name, arguments] to call the actual response helper.
+				rawCalls := make([][3]string, 0, len(toolCalls))
+				for _, tc := range toolCalls {
+					rawCalls = append(rawCalls, [3]string{tc.ID, tc.Function.Name, tc.Function.Arguments})
+				}
+				model.ReturnRawToolCallsResponse(rawCalls, req.Stream, c)
 			} else {
-				logger.Info("No tool needed, answering directly")
+				logger.Info("No tool needed — answering directly")
 				if _, err := pplxClient.SendMessage(prompt.String(), req.Stream, config.ConfigInstance.IsIncognito, c); err != nil {
 					logger.Error(fmt.Sprintf("Failed to send message: %v", err))
 					continue
 				}
 			}
 		} else if hasTools && hasToolResults {
-			// Round 2: tool results are inlined as context in the prompt; get final answer.
-			// Use streaming path when client requested it.
+			// Round 2: tool results are inlined as context; get the final answer.
 			if req.Stream {
 				if statusCode, err := pplxClient.SendMessage(prompt.String(), true, config.ConfigInstance.IsIncognito, c); err != nil {
-					logger.Error(fmt.Sprintf("Failed to send tool result message (stream): status=%d err=%v", statusCode, err))
+					logger.Error(fmt.Sprintf("Tool result stream failed: status=%d err=%v", statusCode, err))
 					continue
 				}
 			} else {
 				text, err := pplxClient.SendMessageCollect(prompt.String(), config.ConfigInstance.IsIncognito)
 				if err != nil {
-					logger.Error(fmt.Sprintf("Failed to send tool result message: %v", err))
+					logger.Error(fmt.Sprintf("Tool result collect failed: %v", err))
 					continue
 				}
 				model.ReturnOpenAIResponse(text, req.Stream, c)
@@ -239,14 +246,12 @@ func ChatCompletionsHandler(c *gin.Context) {
 		}
 		return
 	}
-	logger.Error("Failed for all retries")
+	logger.Error("All retries exhausted")
 	c.JSON(http.StatusInternalServerError, ErrorResponse{
 		Error: "Failed to process request after multiple attempts",
 	})
 }
 
 func ModelsHandler(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"data": config.ResponseModels,
-	})
+	c.JSON(http.StatusOK, gin.H{"data": config.ResponseModels})
 }
