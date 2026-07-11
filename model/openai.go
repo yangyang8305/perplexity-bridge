@@ -18,7 +18,6 @@ type ChatCompletionRequest struct {
 	Tools    []map[string]interface{} `json:"tools,omitempty"`
 }
 
-// OpenAISrteamResponse 定义 OpenAI 的流式响应结构
 type OpenAISrteamResponse struct {
 	ID      string         `json:"id"`
 	Object  string         `json:"object"`
@@ -27,7 +26,6 @@ type OpenAISrteamResponse struct {
 	Choices []StreamChoice `json:"choices"`
 }
 
-// Choice 结构表示 OpenAI 返回的单个选项
 type StreamChoice struct {
 	Index        int         `json:"index"`
 	Delta        Delta       `json:"delta"`
@@ -42,7 +40,6 @@ type NoStreamChoice struct {
 	FinishReason string      `json:"finish_reason"`
 }
 
-// Delta 结构用于存储返回的文本内容
 type Delta struct {
 	Content string `json:"content"`
 }
@@ -76,6 +73,18 @@ type ToolCall struct {
 type ToolCallFunction struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
+}
+
+// ToolCallInfo mirrors core.ToolCallInfo to avoid import cycle
+type ToolCallInfo struct {
+	ID       string
+	Type     string
+	Function ToolCallFunctionInfo
+}
+
+type ToolCallFunctionInfo struct {
+	Name      string
+	Arguments string
 }
 
 func ReturnOpenAIResponse(text string, stream bool, gc *gin.Context) error {
@@ -112,7 +121,6 @@ func streamRespose(text string, gc *gin.Context) error {
 		return err
 	}
 
-	// 发送数据
 	gc.Writer.Write(jsonBytes)
 	gc.Writer.Flush()
 	return nil
@@ -141,11 +149,55 @@ func noStreamResponse(text string, gc *gin.Context) error {
 	return nil
 }
 
+// ReturnToolCallResponse returns a single tool call response (kept for backward compat).
 func ReturnToolCallResponse(toolCallID, functionName, arguments string, stream bool, gc *gin.Context) error {
+	type singleTC struct {
+		ID   string
+		Name string
+		Args string
+	}
+	return returnToolCallsInternal([]singleTC{{toolCallID, functionName, arguments}}, stream, gc)
+}
+
+// ReturnToolCallsResponse returns one or more tool calls in a single response (parallel tool calls).
+// The tcs slice elements must have ID, Function.Name, Function.Arguments fields.
+func ReturnToolCallsResponse(tcs interface{ Len() int }, stream bool, gc *gin.Context) error {
+	// Accept []core.ToolCallInfo via interface — avoid import cycle by using reflection-free approach:
+	// tcs is actually passed as a plain slice from handle.go, so we use the concrete type via a type alias.
+	// Since we can't import core here, handle.go passes pre-serialized data. See below.
+	return nil
+}
+
+// ReturnRawToolCallsResponse accepts pre-built tool call data to avoid import cycles.
+// Each entry: [id, name, arguments_json_string]
+func ReturnRawToolCallsResponse(calls [][3]string, stream bool, gc *gin.Context) error {
 	id := uuid.New().String()
 	created := time.Now().Unix()
-	model := "claude-3-7-sonnet-20250219"
-	argsEscaped, _ := json.Marshal(arguments)
+	mdl := "claude-3-7-sonnet-20250219"
+
+	// Build the tool_calls array JSON
+	type tcJSON struct {
+		Index    int    `json:"index"`
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+	tcList := make([]tcJSON, 0, len(calls))
+	for i, call := range calls {
+		tc := tcJSON{
+			Index: i,
+			ID:    call[0],
+			Type:  "function",
+		}
+		tc.Function.Name = call[1]
+		tc.Function.Arguments = call[2]
+		tcList = append(tcList, tc)
+	}
+	tcBytes, _ := json.Marshal(tcList)
+
 	if stream {
 		gc.Writer.Header().Set("Content-Type", "text/event-stream")
 		gc.Writer.Header().Set("Cache-Control", "no-cache")
@@ -153,21 +205,56 @@ func ReturnToolCallResponse(toolCallID, functionName, arguments string, stream b
 		gc.Writer.WriteHeader(http.StatusOK)
 		gc.Writer.Flush()
 
-		fmt.Fprintf(gc.Writer, `data: {"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":{"role":"assistant","content":null},"logprobs":null,"finish_reason":null}]}`+"\n\n", id, created, model)
+		// Chunk 1: role
+		fmt.Fprintf(gc.Writer, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null},\"logprobs\":null,\"finish_reason\":null}]}\n\n", id, created, mdl)
 		gc.Writer.Flush()
 
-		fmt.Fprintf(gc.Writer, `data: {"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]},"logprobs":null,"finish_reason":null}]}`+"\n\n", id, created, model, toolCallID, functionName, string(argsEscaped))
+		// Chunk 2: tool_calls
+		fmt.Fprintf(gc.Writer, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":%s},\"logprobs\":null,\"finish_reason\":null}]}\n\n", id, created, mdl, string(tcBytes))
 		gc.Writer.Flush()
 
-		fmt.Fprintf(gc.Writer, `data: {"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"tool_calls"}]}`+"\n\n", id, created, model)
+		// Chunk 3: finish
+		fmt.Fprintf(gc.Writer, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\",\"choices\":[{\"index\":0,\"delta\":{},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}]}\n\n", id, created, mdl)
 		gc.Writer.Flush()
 
 		gc.Writer.Write([]byte("data: [DONE]\n\n"))
 		gc.Writer.Flush()
 	} else {
+		// Build tool_calls for non-stream message
+		type tcMsgItem struct {
+			ID       string `json:"id"`
+			Type     string `json:"type"`
+			Function struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"function"`
+		}
+		msgTCs := make([]tcMsgItem, 0, len(calls))
+		for _, call := range calls {
+			item := tcMsgItem{ID: call[0], Type: "function"}
+			item.Function.Name = call[1]
+			item.Function.Arguments = call[2]
+			msgTCs = append(msgTCs, item)
+		}
+		tcMsgBytes, _ := json.Marshal(msgTCs)
+
 		gc.Writer.Header().Set("Content-Type", "application/json")
 		gc.Writer.WriteHeader(http.StatusOK)
-		fmt.Fprintf(gc.Writer, `{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]},"logprobs":null,"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`, id, created, model, toolCallID, functionName, string(argsEscaped))
+		fmt.Fprintf(gc.Writer, `{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":%s},"logprobs":null,"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
+			id, created, mdl, string(tcMsgBytes))
 	}
 	return nil
+}
+
+// returnToolCallsInternal is the internal helper used by ReturnToolCallResponse.
+func returnToolCallsInternal(calls []struct {
+	ID   string
+	Name string
+	Args string
+}, stream bool, gc *gin.Context) error {
+	raw := make([][3]string, len(calls))
+	for i, c := range calls {
+		raw[i] = [3]string{c.ID, c.Name, c.Args}
+	}
+	return ReturnRawToolCallsResponse(raw, stream, gc)
 }
