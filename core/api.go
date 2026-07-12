@@ -159,8 +159,13 @@ func redactToken(token string) string {
 	return token[:8] + "...[REDACTED]"
 }
 
+// timezone 返回配置的时区，默认 America/New_York。
+// #7 fix: 加 RLock 保护并发读取。
 func timezone() string {
-	if tz := config.ConfigInstance.Timezone; tz != "" {
+	config.ConfigInstance.RwMutex.RLock()
+	tz := config.ConfigInstance.Timezone
+	config.ConfigInstance.RwMutex.RUnlock()
+	if tz != "" {
 		return tz
 	}
 	return "America/New_York"
@@ -283,19 +288,7 @@ func (c *Client) SendMessageCollect(message string, is_incognito bool) (string, 
 
 // DetermineToolCalls runs a two-phase tool selection when the tool list exceeds
 // MaxToolsPerRound, otherwise uses a single-phase approach.
-//
-// Phase 1 (only when len(tools) > MaxToolsPerRound):
-//   Send a lightweight prompt containing only tool names and descriptions.
-//   The model returns at most MaxToolsPerRound tool names.
-//
-// Phase 2 (always the final step):
-//   Send the full JSON schema prompt for the selected (or original) tools.
-//   The model fills in the arguments.
-//
-// If either phase fails or returns unparseable output, an error is returned
-// immediately — no fallback to direct answer.
 func (c *Client) DetermineToolCalls(userMessage string, tools []ToolDefinition) ([]ToolCallInfo, error) {
-	// Fast path: tool count within limit, skip phase 1.
 	if len(tools) <= MaxToolsPerRound {
 		prompt := BuildToolSelectionPrompt(userMessage, tools)
 		text, err := c.SendMessageCollect(prompt, true)
@@ -305,7 +298,6 @@ func (c *Client) DetermineToolCalls(userMessage string, tools []ToolDefinition) 
 		return ParseToolSelectionJSONMulti(text), nil
 	}
 
-	// Phase 1: select tool names from a lightweight prompt.
 	phase1Prompt := BuildToolNameSelectionPrompt(userMessage, tools)
 	phase1Text, err := c.SendMessageCollect(phase1Prompt, true)
 	if err != nil {
@@ -316,11 +308,9 @@ func (c *Client) DetermineToolCalls(userMessage string, tools []ToolDefinition) 
 		return nil, fmt.Errorf("tool selection phase 1 parse error: %w", err)
 	}
 	if len(selectedNames) == 0 {
-		// Model determined no tool is needed.
 		return nil, nil
 	}
 
-	// Phase 2: fill arguments using full schema for selected tools only.
 	selectedTools := FilterToolsByNames(tools, selectedNames)
 	if len(selectedTools) == 0 {
 		return nil, fmt.Errorf("tool selection phase 1 returned unknown tool names: %v", selectedNames)
@@ -412,6 +402,13 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 	inThinking := false
 	thinkShown := false
 	final := false
+
+	// #7 fix: 快照需要的 Config 字段，避免在流式循环中反复加锁
+	config.ConfigInstance.RwMutex.RLock()
+	ignoreSearch := config.ConfigInstance.IgnoreSerchResult
+	ignoreMonitor := config.ConfigInstance.IgnoreModelMonitoring
+	config.ConfigInstance.RwMutex.RUnlock()
+
 	for {
 		select {
 		case <-clientDone:
@@ -465,7 +462,7 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 				}
 			}
 			for _, block := range response.Blocks {
-				if !config.ConfigInstance.IgnoreSerchResult && block.WebResultBlock != nil && len(block.WebResultBlock.WebResults) > 0 {
+				if !ignoreSearch && block.WebResultBlock != nil && len(block.WebResultBlock.WebResults) > 0 {
 					webResultsText := "\n\n---\n"
 					for i, result := range block.WebResultBlock.WebResults {
 						webResultsText += "\n\n" + utils.SearchShow(i, result.Name, result.URL, result.Snippet)
@@ -476,7 +473,7 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 					}
 				}
 			}
-			if !config.ConfigInstance.IgnoreModelMonitoring && response.DisplayModel != c.Model {
+			if !ignoreMonitor && response.DisplayModel != c.Model {
 				logger.Warn(fmt.Sprintf("Model drift: requested=%s actual=%s",
 					c.Model, config.ModelReverseMapGet(response.DisplayModel, response.DisplayModel)))
 			}
