@@ -367,7 +367,7 @@ func (c *Client) collectResponse(body io.ReadCloser) (string, error) {
 			}
 		}
 		for _, block := range response.Blocks {
-			if block.MarkdownBlock != nil && len(block.MarkdownBlock.Chunks) > 0 && block.IntendedUsage == "ask_text_0_markdown" {
+			if block.MarkdownBlock != nil && len(block.MarkdownBlock.Chunks) > 0 && (block.IntendedUsage == "ask_text_0_markdown" || block.IntendedUsage == "ask_text") {
 				res_text := ""
 				if inThinking {
 					res_text += "</think>\n\n"
