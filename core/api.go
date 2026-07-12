@@ -347,10 +347,9 @@ func (c *Client) collectResponse(body io.ReadCloser) (string, error) {
 			continue
 		}
 		if response.Status == "COMPLETED" {
-			if inThinking {
-				full_text += "</think>\n\n"
-			}
-			break
+			if inThinking { full_text += "</think>\n\n" }
+			inThinking = false
+			thinkShown = true
 		}
 		for _, block := range response.Blocks {
 			if block.ReasoningPlanBlock != nil && len(block.ReasoningPlanBlock.Goals) > 0 {
@@ -479,6 +478,25 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 			}
 		}
 		if final {
+			// Process remaining blocks from COMPLETED event before breaking
+			for _, block := range response.Blocks {
+				if block.MarkdownBlock != nil && len(block.MarkdownBlock.Chunks) > 0 && (block.IntendedUsage == "ask_text" || block.IntendedUsage == "ask_text_0_markdown") {
+					res_text := ""
+					if inThinking {
+						res_text += "``` \n\n"
+						inThinking = false
+					}
+					for _, chunk := range block.MarkdownBlock.Chunks {
+						if chunk != "" {
+							res_text += chunk
+							full_text += chunk
+						}
+					}
+					if stream {
+						model.ReturnOpenAIResponse(res_text, stream, gc)
+					}
+				}
+			}
 			break
 		}
 		for _, block := range response.Blocks {
