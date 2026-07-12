@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -95,66 +96,163 @@ func GetLastUserMessage(messages []map[string]interface{}) string {
 	return ""
 }
 
+// extractFirstJSON uses json.Decoder to extract the first complete JSON object
+// from text, correctly handling { and } inside string values.
+// #2 fix: replaces hand-rolled brace counting which failed when argument values
+// contained literal { or } characters.
+func extractFirstJSON(text string) (string, bool) {
+	start := strings.Index(text, "{")
+	if start < 0 {
+		return "", false
+	}
+	dec := json.NewDecoder(bytes.NewReader([]byte(text[start:])))
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		return "", false
+	}
+	return string(raw), true
+}
+
+// BuildToolSelectionPrompt constructs a meta-prompt that includes the full JSON
+// schema (required fields, types, descriptions) for each tool so the model can
+// infer correct argument values. It asks for a JSON array to support parallel
+// tool calls; single-function legacy format is still accepted by the parser.
 func BuildToolSelectionPrompt(userMessage string, tools []ToolDefinition) string {
 	var sb strings.Builder
-	sb.WriteString("You are a function selection system. Output ONLY valid JSON.\n\n")
+	sb.WriteString("You are a function selection system. Output ONLY valid JSON, no markdown, no explanation.\n\n")
 	sb.WriteString(fmt.Sprintf("User request: \"%s\"\n\n", userMessage))
-	sb.WriteString("Available functions:\n")
+	sb.WriteString("Available functions (with full JSON Schema):\n")
 	for _, tool := range tools {
-		sb.WriteString(fmt.Sprintf("- %s", tool.Function.Name))
+		sb.WriteString(fmt.Sprintf("\n### %s\n", tool.Function.Name))
 		if tool.Function.Description != "" {
-			sb.WriteString(fmt.Sprintf(": %s", tool.Function.Description))
+			sb.WriteString(fmt.Sprintf("Description: %s\n", tool.Function.Description))
 		}
-		sb.WriteString("\n")
-		if params, ok := tool.Function.Parameters["properties"].(map[string]interface{}); ok {
-			for paramName, paramInfo := range params {
-				if paramMap, ok := paramInfo.(map[string]interface{}); ok {
-					paramType, _ := paramMap["type"].(string)
-					paramDesc, _ := paramMap["description"].(string)
-					sb.WriteString(fmt.Sprintf("  %s (%s): %s\n", paramName, paramType, paramDesc))
-				}
+		if len(tool.Function.Parameters) > 0 {
+			schemaBytes, err := json.MarshalIndent(tool.Function.Parameters, "", "  ")
+			if err == nil {
+				sb.WriteString(fmt.Sprintf("Parameters schema:\n%s\n", string(schemaBytes)))
 			}
 		}
 	}
 	sb.WriteString("\nRules:\n")
-	sb.WriteString("- If the request involves reading/listing/searching files or directories, select the appropriate function\n")
-	sb.WriteString("- If the request involves writing/creating/modifying files, select the appropriate function\n")
-	sb.WriteString("- If the request is a simple conversation, question, or greeting, respond with {\"function\":\"none\"}\n")
-	sb.WriteString("- The request may be in any language; match intent, not exact words\n\n")
-	sb.WriteString("Respond with ONLY this JSON:\n")
-	sb.WriteString("If a function should be called: {\"function\":\"tool_name\",\"arguments\":{\"param1\":\"value1\"}}\n")
-	sb.WriteString("If no function is needed: {\"function\":\"none\"}\n")
+	sb.WriteString("- You MAY call multiple functions in parallel when needed.\n")
+	sb.WriteString("- Fill ALL required parameters; use null only when the schema explicitly allows it.\n")
+	sb.WriteString("- The request may be in any language; match intent, not exact words.\n")
+	sb.WriteString("- If NO function is needed, respond with: {\"functions\": []}\n\n")
+	sb.WriteString("Respond with ONLY this JSON format:\n")
+	sb.WriteString("{\"functions\": [{\"name\": \"tool_name\", \"arguments\": {\"param1\": \"value1\"}}]}\n")
+	sb.WriteString("For a single call: {\"functions\": [{\"name\": \"read_file\", \"arguments\": {\"path\": \"/foo/bar.go\"}}]}\n")
+	sb.WriteString("For parallel calls: {\"functions\": [{\"name\": \"read_file\", \"arguments\": {\"path\": \"a.go\"}}, {\"name\": \"read_file\", \"arguments\": {\"path\": \"b.go\"}}]}\n")
 	return sb.String()
 }
 
-func ParseToolSelectionJSON(text string) *ToolCallInfo {
-	// Find JSON in the text (handle possible surrounding whitespace or markdown)
-	start := strings.Index(text, "{")
-	if start < 0 {
+// ParseToolSelectionJSONMulti parses the model response and returns zero or more
+// ToolCallInfo values, supporting both the new array format and the legacy
+// single-function format for backward compatibility.
+func ParseToolSelectionJSONMulti(text string) []ToolCallInfo {
+	jsonPart, ok := extractFirstJSON(text)
+	if !ok {
 		return nil
 	}
-	end := strings.LastIndex(text, "}")
-	if end < 0 || end <= start {
-		return nil
+
+	// Try new array format first: {"functions": [...]}
+	var newFmt struct {
+		Functions []struct {
+			Name      string                 `json:"name"`
+			Arguments map[string]interface{} `json:"arguments"`
+		} `json:"functions"`
 	}
-	jsonPart := text[start : end+1]
-	var raw struct {
+	if err := json.Unmarshal([]byte(jsonPart), &newFmt); err == nil && newFmt.Functions != nil {
+		var calls []ToolCallInfo
+		for _, f := range newFmt.Functions {
+			if f.Name == "" {
+				continue
+			}
+			argsBytes, _ := json.Marshal(f.Arguments)
+			calls = append(calls, ToolCallInfo{
+				ID:   "call_" + uuid.New().String()[:12],
+				Type: "function",
+				Function: FunctionCallInfo{
+					Name:      f.Name,
+					Arguments: string(argsBytes),
+				},
+			})
+		}
+		return calls
+	}
+
+	// Fallback: legacy single-function format {"function": "name", "arguments": {...}}
+	var legacyFmt struct {
 		Function  string                 `json:"function"`
 		Arguments map[string]interface{} `json:"arguments"`
 	}
-	if err := json.Unmarshal([]byte(jsonPart), &raw); err != nil {
-		return nil
+	if err := json.Unmarshal([]byte(jsonPart), &legacyFmt); err == nil {
+		if legacyFmt.Function == "" || legacyFmt.Function == "none" {
+			return nil
+		}
+		argsBytes, _ := json.Marshal(legacyFmt.Arguments)
+		return []ToolCallInfo{{
+			ID:   "call_" + uuid.New().String()[:12],
+			Type: "function",
+			Function: FunctionCallInfo{
+				Name:      legacyFmt.Function,
+				Arguments: string(argsBytes),
+			},
+		}}
 	}
-	if raw.Function == "" || raw.Function == "none" {
-		return nil
+
+	return nil
+}
+
+// MaxToolsPerRound is the maximum number of tools sent to Perplexity per round.
+// Sending more tools degrades model reasoning quality significantly.
+const MaxToolsPerRound = 3
+
+// BuildToolNameSelectionPrompt builds a lightweight phase-1 prompt that lists
+// only tool names and descriptions, asking the model to pick at most
+// MaxToolsPerRound tools relevant to the user request.
+func BuildToolNameSelectionPrompt(userMessage string, tools []ToolDefinition) string {
+	var sb strings.Builder
+	sb.WriteString("You are a tool selector. Output ONLY valid JSON, no markdown, no explanation.\n\n")
+	sb.WriteString(fmt.Sprintf("User request: \"%s\"\n\n", userMessage))
+	sb.WriteString(fmt.Sprintf("Pick at most %d tools from the list below that are needed to fulfill the request.\n", MaxToolsPerRound))
+	sb.WriteString("If no tool is needed, return {\"tools\": []}.\n\n")
+	sb.WriteString("Available tools:\n")
+	for _, t := range tools {
+		sb.WriteString(fmt.Sprintf("- %s: %s\n", t.Function.Name, t.Function.Description))
 	}
-	argsBytes, _ := json.Marshal(raw.Arguments)
-	return &ToolCallInfo{
-		ID:   "call_" + uuid.New().String()[:12],
-		Type: "function",
-		Function: FunctionCallInfo{
-			Name:      raw.Function,
-			Arguments: string(argsBytes),
-		},
+	sb.WriteString("\nRespond with ONLY:\n{\"tools\": [\"tool_name_1\", \"tool_name_2\"]}\n")
+	return sb.String()
+}
+
+// ParseToolNames parses the phase-1 model response and returns the list of
+// selected tool names. Returns an error if the response is not valid JSON or
+// does not contain the expected structure.
+func ParseToolNames(text string) ([]string, error) {
+	jsonPart, ok := extractFirstJSON(text)
+	if !ok {
+		return nil, fmt.Errorf("tool name selection: no valid JSON found in response: %q", text)
 	}
+	var result struct {
+		Tools []string `json:"tools"`
+	}
+	if err := json.Unmarshal([]byte(jsonPart), &result); err != nil {
+		return nil, fmt.Errorf("tool name selection: JSON parse error: %w (raw: %q)", err, text)
+	}
+	return result.Tools, nil
+}
+
+// FilterToolsByNames returns the subset of all that match the given names.
+func FilterToolsByNames(all []ToolDefinition, names []string) []ToolDefinition {
+	nameSet := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		nameSet[n] = struct{}{}
+	}
+	var out []ToolDefinition
+	for _, t := range all {
+		if _, ok := nameSet[t.Function.Name]; ok {
+			out = append(out, t)
+		}
+	}
+	return out
 }

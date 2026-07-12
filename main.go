@@ -1,27 +1,41 @@
 package main
 
 import (
+	"net/http"
 	"pplx2api/config"
 	"pplx2api/job"
+	"pplx2api/logger"
 	"pplx2api/router"
+	"runtime/debug"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
-	r := gin.Default()
-	// Load configuration
+	// A5 fix: gin.New() instead of gin.Default() to avoid stack-trace leaks via
+	// the built-in recovery middleware. We install our own recovery that logs
+	// without dumping full goroutine stacks to stdout.
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
+		SkipPaths: []string{"/health"},
+	}))
+	r.Use(func(c *gin.Context) {
+		defer func() {
+			if err := recover(); err != nil {
+				logger.Error("panic recovered: %v\n%s", err, debug.Stack())
+				c.AbortWithStatus(http.StatusInternalServerError)
+			}
+		}()
+		c.Next()
+	})
 
-	// Setup all routes
 	router.SetupRoutes(r)
-	// 创建会话更新器，设置更新间隔为24小时
-	sessionUpdater := job.GetSessionUpdater(24 * time.Hour)
 
-	// 启动会话更新器
+	sessionUpdater := job.GetSessionUpdater(24 * time.Hour)
 	sessionUpdater.Start()
 	defer sessionUpdater.Stop()
 
-	// Run the server on 0.0.0.0:8080
 	r.Run(config.ConfigInstance.Address)
 }

@@ -37,31 +37,27 @@ type Config struct {
 	IgnoreSerchResult      bool
 	IgnoreModelMonitoring  bool
 	IsMaxSubscribe         bool
+	Timezone               string
 }
 
-// 解析 SESSION 格式的环境变量
 func parseSessionEnv(envValue string) (int, []SessionInfo) {
 	if envValue == "" {
 		return 0, []SessionInfo{}
 	}
 	var sessions []SessionInfo
 	sessionPairs := strings.Split(envValue, ",")
-	retryCount := len(sessionPairs) // 重试次数等于 session 数量
+	retryCount := len(sessionPairs)
 	for _, pair := range sessionPairs {
 		if pair == "" {
 			retryCount--
 			continue
 		}
-		parts := strings.Split(pair, ":")
-		session := SessionInfo{
-			SessionKey: parts[0],
-		}
-		sessions = append(sessions, session)
+		parts := strings.SplitN(pair, ":", 2)
+		sessions = append(sessions, SessionInfo{SessionKey: parts[0]})
 	}
 	return retryCount, sessions
 }
 
-// 根据模型选择合适的 session
 func (c *Config) GetSessionForModel(idx int) (SessionInfo, error) {
 	if len(c.Sessions) == 0 || idx < 0 || idx >= len(c.Sessions) {
 		return SessionInfo{}, fmt.Errorf("invalid session index: %d", idx)
@@ -71,54 +67,37 @@ func (c *Config) GetSessionForModel(idx int) (SessionInfo, error) {
 	return c.Sessions[idx], nil
 }
 
-// 从环境变量加载配置
 func LoadConfig() *Config {
 	maxChatHistoryLength, err := strconv.Atoi(os.Getenv("MAX_CHAT_HISTORY_LENGTH"))
 	if err != nil {
-		maxChatHistoryLength = 10000 // 默认值
+		maxChatHistoryLength = 10000
 	}
 	retryCount, sessions := parseSessionEnv(os.Getenv("SESSIONS"))
 	promptForFile := os.Getenv("PROMPT_FOR_FILE")
 	if promptForFile == "" {
-		promptForFile = "You must immerse yourself in the role of assistant in txt file, cannot respond as a user, cannot reply to this message, cannot mention this message, and ignore this message in your response." // 默认值
+		promptForFile = "You must immerse yourself in the role of assistant in txt file, cannot respond as a user, cannot reply to this message, cannot mention this message, and ignore this message in your response."
 	}
-	config := &Config{
-		// 解析 SESSIONS 环境变量
-		Sessions: sessions,
-		// 设置服务地址，默认为 "0.0.0.0:8080"
-		Address: os.Getenv("ADDRESS"),
-
-		// 设置 API 认证密钥
-		APIKey: os.Getenv("APIKEY"),
-		// 设置代理地址
-		Proxy: os.Getenv("PROXY"),
-		//是否匿名
-		IsIncognito: os.Getenv("IS_INCOGNITO") != "false",
-		// 设置最大聊天历史长度
-		MaxChatHistoryLength: maxChatHistoryLength,
-		// 设置重试次数
-		RetryCount: retryCount,
-		// 设置是否使用角色前缀
-		NoRolePrefix: os.Getenv("NO_ROLE_PREFIX") == "true",
-		// 设置搜索结果兼容性
+	cfg := &Config{
+		Sessions:               sessions,
+		Address:                os.Getenv("ADDRESS"),
+		APIKey:                 os.Getenv("APIKEY"),
+		Proxy:                  os.Getenv("PROXY"),
+		IsIncognito:            os.Getenv("IS_INCOGNITO") != "false",
+		MaxChatHistoryLength:   maxChatHistoryLength,
+		RetryCount:             retryCount,
+		NoRolePrefix:           os.Getenv("NO_ROLE_PREFIX") == "true",
 		SearchResultCompatible: os.Getenv("SEARCH_RESULT_COMPATIBLE") == "true",
-		// 设置上传文件后的提示词
-		PromptForFile: promptForFile,
-		// 设置是否忽略搜索结果
-		IgnoreSerchResult: os.Getenv("IGNORE_SEARCH_RESULT") == "true",
-		//设置是否忽略模型监控
-		IgnoreModelMonitoring: os.Getenv("IGNORE_MODEL_MONITORING") == "true",
-		// 读写锁
-		RwMutex: sync.RWMutex{},
-		// 是否max订阅
-		IsMaxSubscribe: os.Getenv("IS_MAX_SUBSCRIBE") == "true",
+		PromptForFile:          promptForFile,
+		IgnoreSerchResult:      os.Getenv("IGNORE_SEARCH_RESULT") == "true",
+		IgnoreModelMonitoring:  os.Getenv("IGNORE_MODEL_MONITORING") == "true",
+		RwMutex:                sync.RWMutex{},
+		IsMaxSubscribe:         os.Getenv("IS_MAX_SUBSCRIBE") == "true",
+		Timezone:               os.Getenv("TIMEZONE"),
 	}
-
-	// 如果地址为空，使用默认值
-	if config.Address == "" {
-		config.Address = "0.0.0.0:8080"
+	if cfg.Address == "" {
+		cfg.Address = "127.0.0.1:8080"
 	}
-	return config
+	return cfg
 }
 
 var ConfigInstance *Config
@@ -127,34 +106,35 @@ var Sr *SessionRagen
 func (sr *SessionRagen) NextIndex() int {
 	sr.Mutex.Lock()
 	defer sr.Mutex.Unlock()
-
 	index := sr.Index
 	sr.Index = (index + 1) % len(ConfigInstance.Sessions)
 	return index
 }
+
+// ResetIndex resets the round-robin pointer to 0.
+// A9 fix: called after bulk session pool replacement to avoid out-of-range.
+func (sr *SessionRagen) ResetIndex() {
+	sr.Mutex.Lock()
+	defer sr.Mutex.Unlock()
+	sr.Index = 0
+}
+
 func init() {
 	rand.Seed(time.Now().UnixNano())
-	// 加载环境变量
 	_ = godotenv.Load()
-	Sr = &SessionRagen{
-		Index: 0,
-		Mutex: sync.Mutex{},
-	}
+	Sr = &SessionRagen{Index: 0, Mutex: sync.Mutex{}}
 	ConfigInstance = LoadConfig()
-	logger.Info("Loaded config:")
-	logger.Info(fmt.Sprintf("Sessions count: %d", ConfigInstance.RetryCount))
-	for _, session := range ConfigInstance.Sessions {
-		logger.Info(fmt.Sprintf("Session: %s", session.SessionKey))
+	logger.Info(fmt.Sprintf(
+		"Config loaded: sessions=%d address=%s incognito=%t max_history=%d no_role_prefix=%t search_compat=%t ignore_search=%t is_max=%t",
+		ConfigInstance.RetryCount, ConfigInstance.Address, ConfigInstance.IsIncognito,
+		ConfigInstance.MaxChatHistoryLength, ConfigInstance.NoRolePrefix,
+		ConfigInstance.SearchResultCompatible, ConfigInstance.IgnoreSerchResult,
+		ConfigInstance.IsMaxSubscribe,
+	))
+	if ConfigInstance.APIKey == "" {
+		logger.Warn("APIKEY is empty — no-auth mode, all requests accepted")
 	}
-	logger.Info(fmt.Sprintf("Address: %s", ConfigInstance.Address))
-	logger.Info(fmt.Sprintf("APIKey: %s", ConfigInstance.APIKey))
-	logger.Info(fmt.Sprintf("Proxy: %s", ConfigInstance.Proxy))
-	logger.Info(fmt.Sprintf("IsIncognito: %t", ConfigInstance.IsIncognito))
-	logger.Info(fmt.Sprintf("MaxChatHistoryLength: %d", ConfigInstance.MaxChatHistoryLength))
-	logger.Info(fmt.Sprintf("NoRolePrefix: %t", ConfigInstance.NoRolePrefix))
-	logger.Info(fmt.Sprintf("SearchResultCompatible: %t", ConfigInstance.SearchResultCompatible))
-	logger.Info(fmt.Sprintf("PromptForFile: %s", ConfigInstance.PromptForFile))
-	logger.Info(fmt.Sprintf("IgnoreSerchResult: %t", ConfigInstance.IgnoreSerchResult))
-	logger.Info(fmt.Sprintf("IgnoreModelMonitoring: %t", ConfigInstance.IgnoreModelMonitoring))
-	logger.Info(fmt.Sprintf("IsMaxSubscribe: %t", ConfigInstance.IsMaxSubscribe))
+	if len(ConfigInstance.Sessions) == 0 {
+		logger.Warn("No SESSIONS configured — service will return 503 on all chat requests")
+	}
 }

@@ -2,7 +2,6 @@ package job
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"log"
 	"os"
 	"sync"
@@ -12,22 +11,17 @@ import (
 	"pplx2api/core"
 )
 
-const (
-	// ConfigFileName is the name of the file to store sessions
-	ConfigFileName = "sessions.json"
-)
+const ConfigFileName = "sessions.json"
 
 var (
 	sessionUpdaterInstance *SessionUpdater
 	sessionUpdaterOnce     sync.Once
 )
 
-// SessionConfig represents the structure to be saved to file
 type SessionConfig struct {
 	Sessions []config.SessionInfo `json:"sessions"`
 }
 
-// SessionUpdater 管理 Perplexity 会话的定时更新
 type SessionUpdater struct {
 	interval    time.Duration
 	stopChan    chan struct{}
@@ -36,104 +30,74 @@ type SessionUpdater struct {
 	configPath  string
 }
 
-// NewSessionUpdater 创建一个新的会话更新器
-// interval: 更新间隔时间
 func GetSessionUpdater(interval time.Duration) *SessionUpdater {
 	sessionUpdaterOnce.Do(func() {
-		// 使用当前文件夹下的配置文件
-		configPath := ConfigFileName
-
 		sessionUpdaterInstance = &SessionUpdater{
 			interval:   interval,
 			stopChan:   make(chan struct{}),
 			isRunning:  false,
-			configPath: configPath,
+			configPath: ConfigFileName,
 		}
-		// 初始化时从文件加载会话
 		sessionUpdaterInstance.loadSessionsFromFile()
 	})
 	return sessionUpdaterInstance
 }
 
-// loadSessionsFromFile loads sessions from the config file if it exists
 func (su *SessionUpdater) loadSessionsFromFile() {
-	// Check if file exists
 	if _, err := os.Stat(su.configPath); os.IsNotExist(err) {
 		log.Println("No sessions config file found, will create on first update")
 		return
 	}
-
-	// Read the file
-	data, err := ioutil.ReadFile(su.configPath)
+	// A8 fix: os.ReadFile instead of deprecated ioutil.ReadFile
+	data, err := os.ReadFile(su.configPath)
 	if err != nil {
 		log.Printf("Failed to read sessions config file: %v", err)
 		return
 	}
-
-	// Parse the JSON
 	var sessionConfig SessionConfig
 	if err := json.Unmarshal(data, &sessionConfig); err != nil {
 		log.Printf("Failed to parse sessions config file: %v", err)
 		return
 	}
-
-	// Update the config with loaded sessions
 	config.ConfigInstance.RwMutex.Lock()
 	config.ConfigInstance.Sessions = sessionConfig.Sessions
+	config.ConfigInstance.RetryCount = len(sessionConfig.Sessions)
 	config.ConfigInstance.RwMutex.Unlock()
-
+	// #3 fix: reset round-robin index after replacing session pool to avoid out-of-range index
+	config.Sr.ResetIndex()
 	log.Printf("Loaded %d sessions from config file", len(sessionConfig.Sessions))
 }
 
-// saveSessionsToFile saves the current sessions to the config file
-func (su *SessionUpdater) saveSessionsToFile() error {
-	// Get current sessions
-	config.ConfigInstance.RwMutex.RLock()
-	sessionsCopy := make([]config.SessionInfo, len(config.ConfigInstance.Sessions))
-	copy(sessionsCopy, config.ConfigInstance.Sessions)
-	config.ConfigInstance.RwMutex.RUnlock()
-
-	// Create config structure
-	sessionConfig := SessionConfig{
-		Sessions: sessionsCopy,
-	}
-
-	// Convert to JSON
-	data, err := json.MarshalIndent(sessionConfig, "", "  ")
+func (su *SessionUpdater) saveSessionsToFile(sessions []config.SessionInfo) error {
+	data, err := json.MarshalIndent(SessionConfig{Sessions: sessions}, "", "  ")
 	if err != nil {
 		return err
 	}
-
-	// Write to file
-	err = ioutil.WriteFile(su.configPath, data, 0644)
-	if err != nil {
+	// A8 fix: os.WriteFile instead of deprecated ioutil.WriteFile
+	if err := os.WriteFile(su.configPath, data, 0644); err != nil {
 		return err
 	}
-
-	log.Printf("Saved %d sessions to sessions.json file", len(sessionsCopy))
+	log.Printf("Saved %d sessions to %s", len(sessions), su.configPath)
 	return nil
 }
 
-// Start 启动定时更新任务
 func (su *SessionUpdater) Start() {
 	su.runningLock.Lock()
 	defer su.runningLock.Unlock()
 	if su.isRunning {
-		log.Println("Session updater is already running")
+		log.Println("Session updater already running")
 		return
 	}
 	su.isRunning = true
 	su.stopChan = make(chan struct{})
 	go su.runUpdateLoop()
-	log.Println("Session updater started with interval:", su.interval)
+	log.Println("Session updater started, interval:", su.interval)
 }
 
-// Stop 停止定时更新任务
 func (su *SessionUpdater) Stop() {
 	su.runningLock.Lock()
 	defer su.runningLock.Unlock()
 	if !su.isRunning {
-		log.Println("Session updater is not running")
 		return
 	}
 	close(su.stopChan)
@@ -141,12 +105,9 @@ func (su *SessionUpdater) Stop() {
 	log.Println("Session updater stopped")
 }
 
-// runUpdateLoop 运行更新循环
 func (su *SessionUpdater) runUpdateLoop() {
 	ticker := time.NewTicker(su.interval)
 	defer ticker.Stop()
-	// 立即执行一次更新
-	// su.updateAllSessions()
 	for {
 		select {
 		case <-ticker.C:
@@ -158,54 +119,71 @@ func (su *SessionUpdater) runUpdateLoop() {
 	}
 }
 
-// updateAllSessions 更新所有会话
+// firstValidModel returns the first key in ModelMap, used as a neutral model
+// for cookie refresh (A2 fix: was hardcoded to a stale model name).
+func firstValidModel() string {
+	for k := range config.ModelMap {
+		return k
+	}
+	return "sonar" // absolute fallback
+}
+
 func (su *SessionUpdater) updateAllSessions() {
-	log.Println("Starting session update for all sessions...")
-	// 复制当前会话列表，避免长时间持有锁
+	log.Println("Starting session refresh...")
 	config.ConfigInstance.RwMutex.RLock()
 	sessionsCopy := make([]config.SessionInfo, len(config.ConfigInstance.Sessions))
 	copy(sessionsCopy, config.ConfigInstance.Sessions)
 	proxy := config.ConfigInstance.Proxy
 	config.ConfigInstance.RwMutex.RUnlock()
-	// 如果没有会话需要更新，直接返回
+
 	if len(sessionsCopy) == 0 {
-		log.Println("No sessions to update")
+		log.Println("No sessions to refresh")
 		return
 	}
-	// 创建更新后的会话切片
-	updatedSessions := make([]config.SessionInfo, len(sessionsCopy))
+
+	model := firstValidModel()
+
+	// A3 fix: collect only successfully refreshed sessions; drop failed ones.
+	type result struct {
+		index   int
+		session config.SessionInfo
+		ok      bool
+	}
+	results := make([]result, len(sessionsCopy))
 	var wg sync.WaitGroup
-	// 对每个会话执行更新
 	for i, session := range sessionsCopy {
 		wg.Add(1)
-		go func(index int, origSession config.SessionInfo) {
+		go func(idx int, orig config.SessionInfo) {
 			defer wg.Done()
-			// 创建客户端并更新 cookie
-			// 写死 model 和 openSearch 参数
-			client := core.NewClient(origSession.SessionKey, proxy, "claude-3-opus-20240229", false)
+			client := core.NewClient(orig.SessionKey, proxy, model, false)
 			newCookie, err := client.GetNewCookie()
 			if err != nil {
-				log.Printf("Failed to update session %d: %v", index, err)
-				// 如果更新失败，保留原始会话
-				updatedSessions[index] = origSession
+				log.Printf("Session %d refresh failed: %v — dropping", idx, err)
+				results[idx] = result{index: idx, ok: false}
 				return
 			}
-			// 创建更新后的会话对象
-			updatedSessions[index] = config.SessionInfo{
-				SessionKey: newCookie,
-			}
+			results[idx] = result{index: idx, session: config.SessionInfo{SessionKey: newCookie}, ok: true}
 		}(i, session)
 	}
-	// 等待所有更新完成
 	wg.Wait()
-	// 一次性替换所有会话
+
+	// Build updated list with only live sessions
+	updatedSessions := make([]config.SessionInfo, 0, len(sessionsCopy))
+	for _, r := range results {
+		if r.ok {
+			updatedSessions = append(updatedSessions, r.session)
+		}
+	}
+	log.Printf("Session refresh done: %d/%d alive", len(updatedSessions), len(sessionsCopy))
+
 	config.ConfigInstance.RwMutex.Lock()
 	config.ConfigInstance.Sessions = updatedSessions
+	config.ConfigInstance.RetryCount = len(updatedSessions)
 	config.ConfigInstance.RwMutex.Unlock()
-	log.Printf("All %d sessions have been updated", len(updatedSessions))
+	// A9 fix + #3 fix: reset round-robin index AFTER releasing RwMutex to keep lock order consistent
+	config.Sr.ResetIndex()
 
-	// 保存更新后的配置到文件
-	if err := su.saveSessionsToFile(); err != nil {
-		log.Printf("Failed to save updated config: %v", err)
+	if err := su.saveSessionsToFile(updatedSessions); err != nil {
+		log.Printf("Failed to save sessions: %v", err)
 	}
 }
