@@ -1,157 +1,157 @@
 # perplexity-bridge
 
-<div align="center">
-
-[English](#english) · [中文](#中文) · [日本語](#日本語)
-
-</div>
+> 将 Perplexity AI 包装成完整兼容 OpenAI API 的本地网关，支持流式输出、图片上传、Function Calling、多 Session 轮转与自动刷新。
 
 ---
 
-# English
+## 功能特性
 
-An OpenAI-compatible proxy for Perplexity AI. Uses the Perplexity web API under the hood, exposes a standard `/v1/chat/completions` endpoint.
+- **OpenAI API 兼容** — `/v1/chat/completions`、`/v1/models` 等标准接口，可直接接入任意支持 OpenAI 的客户端
+- **流式输出** — Server-Sent Events (SSE) 实时流式返回
+- **多模型支持** — Claude、GPT、Gemini、Grok、Kimi、Sonar 系列等；模型名加 `-search` 后缀开启网络搜索
+- **Function Calling** — 两阶段工具选择，支持并行工具调用，输出格式完整符合 OpenAI spec
+- **图片上传** — 支持 base64 图片自动上传到 Perplexity
+- **长文本上传** — 超过限制长度时自动将上下文上传为文件
+- **多 Session 轮转** — 支持配置多个 Session，自动轮转负载均衡，失败自动重试
+- **Session 自动刷新** — 定时刷新 Cookie，将有效 Session 持久化到 `sessions.json`
+- **Web 管理面板** — 内置 Dashboard 可查看运行状态、手动触发刷新、重载配置
+- **思考链支持** — 自动识别 `<think>` 思考内容并包装输出
+- **搜索结果嵌入** — 开启搜索模式时自动将网页引用附加在回复后
 
-## What's New vs Upstream
+---
 
-This fork adds the following on top of the original [pplx2api](https://github.com/yushangxiao/pplx2api):
+## 支持的模型
 
-- **Tool calling (function calling)** – the upstream only supports plain chat. This fork adds a meta-request proxy: when `tools` are in the request, it asks Perplexity "which tool to call?", parses the JSON response, and returns OpenAI-compatible `tool_calls`. This enables agentic use (e.g. OpenCode, LangChain, Vercel AI SDK) without Perplexity natively supporting function calling.
-- **Updated model list** – 22 validated model mappings covering Claude 4.6, GPT 5.4, Gemini 3.1, Grok 4.1, Sonar, Kimi, DeepSeek R1, o4-mini, and more. Each available with or without `-search` suffix.
-- **Provider-prefix stripping** – models can be requested as `pplx2api/claude-4.6-sonnet` (the prefix is stripped automatically), compatible with OpenCode's provider selector.
+| 模型 ID | 说明 |
+|---------|------|
+| `claude-4.6-sonnet` | Claude 4.6 Sonnet |
+| `claude-4.6-sonnet-think` | Claude 4.6 Sonnet 思考模式 |
+| `claude-4.5-sonnet` | Claude 4.5 Sonnet |
+| `claude-4.0-sonnet` | Claude 4.0 Sonnet |
+| `gpt-5.4` | GPT-5.4 |
+| `gpt-5.4-think` | GPT-5.4 思考模式 |
+| `gpt-5.2` | GPT-5.2 |
+| `gpt-4.1` | GPT-4.1 |
+| `gpt-4o` | GPT-4o |
+| `o4-mini` | o4-mini |
+| `gemini-3.1-pro` | Gemini 3.1 Pro |
+| `gemini-3-pro` | Gemini 3 Pro |
+| `grok-4.1` | Grok 4.1 |
+| `kimi` | Kimi |
+| `kimi-k2` | Kimi K2 |
+| `kimi-k2-think` | Kimi K2 思考模式 |
+| `sonar` | Sonar |
+| `sonar-pro` | Sonar Pro |
+| `sonar-reasoning` | Sonar Reasoning |
+| `sonar-reasoning-pro` | Sonar Reasoning Pro |
+| `sonar-deep-research` | Sonar Deep Research |
+| `deepseek-r1` | DeepSeek R1 |
+| `claude-4.6-opus` ☆ | Claude 4.6 Opus（需 Max 订阅） |
+| `claude-4.6-opus-think` ☆ | Claude 4.6 Opus 思考模式（需 Max 订阅） |
 
-## Features
+> ☆ Max 订阅专属模型需设置 `IS_MAX_SUBSCRIBE=true` 才会出现在 `/v1/models` 列表中。
+>
+> 所有模型 ID 后加 `-search` 尾缀可开启网络搜索，例如 `claude-4.6-sonnet-search`。
 
-- **OpenAI-compatible API** – drop-in replacement for any OpenAI client
-- **Tool calling** – meta-request proxy converts user tool definitions into a Perplexity query, parses the response, and returns standard `tool_calls` (no native function-calling needed)
-- **Streaming & non-streaming** – full SSE streaming support
-- **Image recognition** – send images for analysis
-- **Web search** – append `-search` to any model name
-- **Thinking models** – access reasoning models, outputs `<think>` tags
-- **Multiple accounts** – comma-separated sessions for round-robin / retry
-- **Model monitoring** – detects if Perplexity falls back to a different model
+---
 
-## Supported Models
+## 快速部署
 
-| Friendly Name | Internal Name |
-|---|---|
-| Claude 4.6 Sonnet | `claude46sonnet` |
-| Claude 4.6 Sonnet Think | `claude46sonnetthinking` |
-| GPT 5.4 | `gpt54` |
-| GPT 5.4 Think | `gpt54_thinking` |
-| GPT 5.2 | `gpt52` |
-| Claude 4.5 Sonnet | `claude45sonnet` |
-| Gemini 3.1 Pro | `gemini31pro_high` |
-| Gemini 3 Pro | `gemini3pro` |
-| Grok 4.1 | `grok41` |
-| Sonar | `sonar` |
-| Sonar Pro | `sonar-pro` |
-| Sonar Reasoning | `sonar_reasoning` |
-| Sonar Reasoning Pro | `sonar-reasoning-pro` |
-| Sonar Deep Research | `sonar_deep_research` |
-| Kimi | `kimi` |
-| Kimi K2 | `kimi-k2` |
-| Kimi K2 Think | `kimi_k2_thinking` |
-| o4-mini | `o4-mini` |
-| GPT 4o | `gpt-4o` |
-| GPT 4.1 | `gpt-4.1` |
-| Claude 4.0 Sonnet | `claude-4.0-sonnet` |
-| DeepSeek R1 | `deepseek-r1` |
-
-Append `-search` to any model for web search mode (e.g. `claude-4.6-sonnet-search`).
-
-## Quick Start
-
-1. Get your `__Secure-next-auth.session-token` cookie from https://perplexity.ai
-2. Create `.env`:
-
-```
-SESSIONS=<your-cookie>
-APIKEY=<your-chosen-key>
-ADDRESS=0.0.0.0:8080
-IS_INCOGNITO=true
-```
-
-3. Run:
-
-```bash
-go build -o pplx2api.exe .
-pplx2api.exe
-```
-
-Or use Docker:
+### Docker
 
 ```bash
 docker run -d \
   -p 8080:8080 \
-  -e SESSIONS=<your-cookie> \
-  -e APIKEY=123 \
-  ghcr.io/yushangxiao/pplx2api:latest
+  -e SESSIONS="your_session_token_here" \
+  -e APIKEY="your_api_key" \
+  --name perplexity-bridge \
+  ghcr.io/yangyang8305/perplexity-bridge:latest
 ```
 
-## API
+### Docker Compose
+
+```yaml
+services:
+  perplexity-bridge:
+    image: ghcr.io/yangyang8305/perplexity-bridge:latest
+    ports:
+      - "8080:8080"
+    environment:
+      SESSIONS: "session_token_1,session_token_2"
+      APIKEY: "your_api_key"
+      IS_INCOGNITO: "true"
+      IS_MAX_SUBSCRIBE: "false"
+    restart: unless-stopped
+```
+
+### 本地运行
 
 ```bash
-curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-4.6-sonnet",
-    "messages": [{"role": "user", "content": "Hello"}],
-    "stream": true
-  }'
+# 复制配置文件
+cp .env.example .env
+# 编辑 .env 填入你的 Session
+vim .env
+# 运行
+go run main.go
 ```
 
-## Tool Calling
+Windows 可直接双击 `启动服务.bat` 或运行 `start_local.ps1`。
 
-When `tools` are present in the request, the proxy sends a meta-prompt to Perplexity asking which tool to invoke, then returns a standard `tool_calls` response. After the tool result is returned, the second round produces the final answer.
+---
 
-## Configuration
+## 环境变量
 
-| Variable | Description |
-|---|---|
-| `SESSIONS` | Perplexity session cookie(s), comma-separated |
-| `APIKEY` | API key for authentication |
-| `ADDRESS` | Listen address (default `0.0.0.0:8080`) |
-| `PROXY` | HTTP proxy URL |
-| `IS_INCOGNITO` | Use incognito sessions (default `true`) |
-| `IS_MAX_SUBSCRIBE` | Enable Max-tier models (default `false`) |
-| `IGNORE_SEARCH_RESULT` | Hide search results in output |
+| 变量名 | 必填 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `SESSIONS` | 是 | — | Session Token，多个用逗号分隔 |
+| `APIKEY` | 否 | 空 | 访问此服务的 API Key（空则不鉴权） |
+| `ADDRESS` | 否 | `:8080` | 监听地址 |
+| `IS_INCOGNITO` | 否 | `true` | 是否开启隐身模式 |
+| `IS_MAX_SUBSCRIBE` | 否 | `false` | 是否是 Max 订阅（解锁 Opus 等模型） |
+| `PROXY` | 否 | 空 | HTTP/SOCKS5 代理地址 |
+| `MAX_CHAT_HISTORY_LENGTH` | 否 | `10000` | 超过此长度自动上传文本 |
+| `PROMPT_FOR_FILE` | 否 | 内置 | 上传文件后的提示语 |
+| `NO_ROLE_PREFIX` | 否 | `false` | 是否去掉角色前缀（System:/Human:/Assistant:） |
+| `IGNORE_SEARCH_RESULT` | 否 | `false` | 是否隐藏搜索结果引用 |
+| `SEARCH_RESULT_COMPATIBLE` | 否 | `false` | 搜索结果改用简洁格式 |
+| `IGNORE_MODEL_MONITORING` | 否 | `false` | 关闭模型漂移警告日志 |
+| `TIMEZONE` | 否 | `America/New_York` | 时区（如 `Asia/Shanghai`） |
+
+---
+
+## 接口说明
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/v1/chat/completions` | 聊天接口（兼容 OpenAI） |
+| GET | `/v1/models` | 获取模型列表 |
+| GET | `/health` | 健康检查 |
+| GET | `/dashboard` | Web 管理面板 |
+| GET | `/admin/status` | 运行状态 JSON |
+| POST | `/admin/refresh` | 手动触发 Session 刷新 |
+| POST | `/admin/reload` | 重载 `.env` 配置 |
+
+---
+
+## 获取 Session Token
+
+1. 登录 [perplexity.ai](https://www.perplexity.ai)
+2. 打开浏览器开发者工具 → Application → Cookies
+3. 找到 `__Secure-next-auth.session-token`，复制其值
+4. 填入 `SESSIONS` 环境变量
+
+多个 Token 用逗号分隔：`SESSIONS=token1,token2,token3`
+
+---
+
+## 局限性
+
+- Perplexity 本身不支持原生 Function Calling，本项目通过两次独立请求模拟工具调用（先选工具再填参数），效果依赖模型语义理解能力，不保证 100% 准确率
+- Session Token 会定期过期，建议开启自动刷新
+- 受 Perplexity 速率限制，高并发场景建议配置多个 Session
+
+---
 
 ## License
 
 MIT
-
-## Acknowledgements
-
-Based on the original [pplx2api](https://github.com/yushangxiao/pplx2api) by yushangxiao.
-
----
-
-# 中文
-
-基于 Perplexity 网页接口的 OpenAI 兼容代理。将 Perplexity 的私有 API 转换为标准的 `/v1/chat/completions` 端点，支持工具调用（Tool Calling）、流式输出、识图、联网搜索等功能，可无缝接入 OpenCode、LangChain、Vercel AI SDK 等任意 OpenAI 客户端。
-
-## 与上游项目的差异
-
-本 Fork 在原始 [pplx2api](https://github.com/yushangxiao/pplx2api) 基础上新增：
-
-- **工具调用（Function Calling）** – 上游仅支持普通对话。本 Fork 通过元请求代理实现：当请求中包含 `tools` 时，向 Perplexity 询问"该调用哪个工具"，解析 JSON 响应后返回 OpenAI 兼容的 `tool_calls`，让 Perplexity 也能用于 Agent 场景（OpenCode、LangChain 等）
-- **更新模型列表** – 22 个已验证的模型映射，涵盖 Claude 4.6、GPT 5.4、Gemini 3.1、Grok 4.1、Sonar、Kimi、DeepSeek R1、o4-mini 等，每个模型均可附加 `-search` 后缀使用联网搜索
-- **提供商前缀剥离** – 支持 `pplx2api/claude-4.6-sonnet` 格式，前缀自动剥离，兼容 OpenCode 的提供商选择器
-
----
-
-# 日本語
-
-Perplexity の Web API を OpenAI 互換エンドポイントに変換するプロキシです。ツール呼び出し、ストリーミング、画像認識、Web 検索などをサポート。OpenCode、LangChain、Vercel AI SDK などの OpenAI クライアントからそのまま利用できます。
-
-## 元のプロジェクトとの違い
-
-- **ツール呼び出し** – リクエストに `tools` が含まれる場合、Perplexity に「どのツールを呼び出すか」をメタプロンプトで問い合わせ、OpenAI 互換の `tool_calls` を返却します
-- **モデルリスト更新** – Claude 4.6、GPT 5.4、Gemini 3.1 など 22 の検証済みモデルをマッピング。`-search` サフィックスで Web 検索モードにも対応
-- **プロバイダープレフィックス除去** – `pplx2api/claude-4.6-sonnet` 形式のモデル名から自動的にプレフィックスを除去します
-
----
-
-## Features
