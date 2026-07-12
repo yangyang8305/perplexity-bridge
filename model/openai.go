@@ -11,13 +11,6 @@ import (
 	"github.com/google/uuid"
 )
 
-type ChatCompletionRequest struct {
-	Model    string                   `json:"model"`
-	Messages []map[string]interface{} `json:"messages"`
-	Stream   bool                     `json:"stream"`
-	Tools    []map[string]interface{} `json:"tools,omitempty"`
-}
-
 type OpenAISrteamResponse struct {
 	ID      string         `json:"id"`
 	Object  string         `json:"object"`
@@ -75,18 +68,6 @@ type ToolCallFunction struct {
 	Arguments string `json:"arguments"`
 }
 
-// ToolCallInfo mirrors core.ToolCallInfo to avoid import cycle
-type ToolCallInfo struct {
-	ID       string
-	Type     string
-	Function ToolCallFunctionInfo
-}
-
-type ToolCallFunctionInfo struct {
-	Name      string
-	Arguments string
-}
-
 // responseModel is the placeholder model name returned to clients.
 // B2 fix: was hardcoded inline in both stream and nostream; centralised here.
 const responseModel = "perplexity-bridge"
@@ -103,7 +84,7 @@ func streamRespose(text string, gc *gin.Context) error {
 		ID:      uuid.New().String(),
 		Object:  "chat.completion.chunk",
 		Created: time.Now().Unix(),
-		Model:   responseModel, // B2 fix
+		Model:   responseModel,
 		Choices: []StreamChoice{
 			{
 				Index:        0,
@@ -127,14 +108,13 @@ func streamRespose(text string, gc *gin.Context) error {
 }
 
 // B7 fix: use gc.Writer instead of gc.JSON so the response is flushable
-// and consistent with streamRespose. gc.JSON calls WriteHeader internally
-// which would conflict if headers were already sent in a stream scenario.
+// and consistent with streamRespose.
 func noStreamResponse(text string, gc *gin.Context) error {
 	openAIResp := &OpenAIResponse{
 		ID:      uuid.New().String(),
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
-		Model:   responseModel, // B2 fix
+		Model:   responseModel,
 		Choices: []NoStreamChoice{
 			{
 				Index: 0,
@@ -160,27 +140,16 @@ func noStreamResponse(text string, gc *gin.Context) error {
 
 // ReturnRawToolCallsResponse accepts pre-built tool call data to avoid import cycles.
 // Each entry: [id, name, arguments_json_string]
+//
+// #10 fix: stream mode now emits one chunk per tool call, matching the OpenAI
+// streaming spec:
+//
+//	1. role chunk:  delta={"role":"assistant","content":null}
+//	2. per-call chunk: delta={"tool_calls":[{index,id,type,function:{name,arguments}}]}
+//	3. finish chunk: delta={}, finish_reason="tool_calls"
 func ReturnRawToolCallsResponse(calls [][3]string, stream bool, gc *gin.Context) error {
 	id := uuid.New().String()
 	created := time.Now().Unix()
-
-	type tcJSON struct {
-		Index    int    `json:"index"`
-		ID       string `json:"id"`
-		Type     string `json:"type"`
-		Function struct {
-			Name      string `json:"name"`
-			Arguments string `json:"arguments"`
-		} `json:"function"`
-	}
-	tcList := make([]tcJSON, 0, len(calls))
-	for i, call := range calls {
-		tc := tcJSON{Index: i, ID: call[0], Type: "function"}
-		tc.Function.Name = call[1]
-		tc.Function.Arguments = call[2]
-		tcList = append(tcList, tc)
-	}
-	tcBytes, _ := json.Marshal(tcList)
 
 	if stream {
 		gc.Writer.Header().Set("Content-Type", "text/event-stream")
@@ -189,11 +158,40 @@ func ReturnRawToolCallsResponse(calls [][3]string, stream bool, gc *gin.Context)
 		gc.Writer.WriteHeader(http.StatusOK)
 		gc.Writer.Flush()
 
-		fmt.Fprintf(gc.Writer, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null},\"logprobs\":null,\"finish_reason\":null}]}\n\n", id, created, responseModel)
+		// Chunk 1: role announcement
+		fmt.Fprintf(gc.Writer,
+			"data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\","+
+				"\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null},"+
+				"\"logprobs\":null,\"finish_reason\":null}]}\n\n",
+			id, created, responseModel)
 		gc.Writer.Flush()
-		fmt.Fprintf(gc.Writer, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":%s},\"logprobs\":null,\"finish_reason\":null}]}\n\n", id, created, responseModel, string(tcBytes))
-		gc.Writer.Flush()
-		fmt.Fprintf(gc.Writer, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\",\"choices\":[{\"index\":0,\"delta\":{},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}]}\n\n", id, created, responseModel)
+
+		// Chunk 2..N: one chunk per tool call
+		for i, call := range calls {
+			tcChunk := map[string]interface{}{
+				"index": i,
+				"id":    call[0],
+				"type":  "function",
+				"function": map[string]string{
+					"name":      call[1],
+					"arguments": call[2],
+				},
+			}
+			tcBytes, _ := json.Marshal([]interface{}{tcChunk})
+			fmt.Fprintf(gc.Writer,
+				"data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\","+
+					"\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":%s},"+
+					"\"logprobs\":null,\"finish_reason\":null}]}\n\n",
+				id, created, responseModel, string(tcBytes))
+			gc.Writer.Flush()
+		}
+
+		// Final chunk: finish_reason=tool_calls
+		fmt.Fprintf(gc.Writer,
+			"data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":\"%s\","+
+				"\"choices\":[{\"index\":0,\"delta\":{},"+
+				"\"logprobs\":null,\"finish_reason\":\"tool_calls\"}]}\n\n",
+			id, created, responseModel)
 		gc.Writer.Flush()
 		gc.Writer.Write([]byte("data: [DONE]\n\n"))
 		gc.Writer.Flush()
@@ -216,7 +214,11 @@ func ReturnRawToolCallsResponse(calls [][3]string, stream bool, gc *gin.Context)
 		tcMsgBytes, _ := json.Marshal(msgTCs)
 		gc.Writer.Header().Set("Content-Type", "application/json")
 		gc.Writer.WriteHeader(http.StatusOK)
-		fmt.Fprintf(gc.Writer, `{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":%s},"logprobs":null,"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
+		fmt.Fprintf(gc.Writer,
+			`{"id":"%s","object":"chat.completion","created":%d,"model":"%s",`+
+				`"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":%s},`+
+				`"logprobs":null,"finish_reason":"tool_calls"}],`+
+				`"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
 			id, created, responseModel, string(tcMsgBytes))
 	}
 	return nil
