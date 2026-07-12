@@ -13,6 +13,7 @@ var ModelMap = map[string]string{
 	"gpt-5.5":                 "gpt55",
 	"gpt-5.5-think":           "gpt55_thinking",
 	"gpt-5.6-sol":             "gpt56_sol",
+	"gpt-5.6-sol-think":       "gpt56_sol_thinking",
 	"gpt-5.6-terra":           "gpt56_terra",
 	"gpt-5.6-terra-think":     "gpt56_terra_thinking",
 	"gemini-3.1-pro":          "gemini31pro_high",
