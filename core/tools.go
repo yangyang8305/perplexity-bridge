@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -95,6 +96,23 @@ func GetLastUserMessage(messages []map[string]interface{}) string {
 	return ""
 }
 
+// extractFirstJSON uses json.Decoder to extract the first complete JSON object
+// from text, correctly handling { and } inside string values.
+// #2 fix: replaces hand-rolled brace counting which failed when argument values
+// contained literal { or } characters.
+func extractFirstJSON(text string) (string, bool) {
+	start := strings.Index(text, "{")
+	if start < 0 {
+		return "", false
+	}
+	dec := json.NewDecoder(bytes.NewReader([]byte(text[start:])))
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		return "", false
+	}
+	return string(raw), true
+}
+
 // BuildToolSelectionPrompt constructs a meta-prompt that includes the full JSON
 // schema (required fields, types, descriptions) for each tool so the model can
 // infer correct argument values. It asks for a JSON array to support parallel
@@ -132,31 +150,10 @@ func BuildToolSelectionPrompt(userMessage string, tools []ToolDefinition) string
 // ToolCallInfo values, supporting both the new array format and the legacy
 // single-function format for backward compatibility.
 func ParseToolSelectionJSONMulti(text string) []ToolCallInfo {
-	start := strings.Index(text, "{")
-	if start < 0 {
+	jsonPart, ok := extractFirstJSON(text)
+	if !ok {
 		return nil
 	}
-	// Find the matching closing brace for the outermost object
-	depth := 0
-	end := -1
-	for i := start; i < len(text); i++ {
-		switch text[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				end = i
-			}
-		}
-		if end >= 0 {
-			break
-		}
-	}
-	if end < 0 {
-		return nil
-	}
-	jsonPart := text[start : end+1]
 
 	// Try new array format first: {"functions": [...]}
 	var newFmt struct {
@@ -232,32 +229,14 @@ func BuildToolNameSelectionPrompt(userMessage string, tools []ToolDefinition) st
 // selected tool names. Returns an error if the response is not valid JSON or
 // does not contain the expected structure.
 func ParseToolNames(text string) ([]string, error) {
-	start := strings.Index(text, "{")
-	if start < 0 {
-		return nil, fmt.Errorf("tool name selection: no JSON found in response: %q", text)
-	}
-	depth, end := 0, -1
-	for i := start; i < len(text); i++ {
-		switch text[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				end = i
-			}
-		}
-		if end >= 0 {
-			break
-		}
-	}
-	if end < 0 {
-		return nil, fmt.Errorf("tool name selection: unterminated JSON in response: %q", text)
+	jsonPart, ok := extractFirstJSON(text)
+	if !ok {
+		return nil, fmt.Errorf("tool name selection: no valid JSON found in response: %q", text)
 	}
 	var result struct {
 		Tools []string `json:"tools"`
 	}
-	if err := json.Unmarshal([]byte(text[start:end+1]), &result); err != nil {
+	if err := json.Unmarshal([]byte(jsonPart), &result); err != nil {
 		return nil, fmt.Errorf("tool name selection: JSON parse error: %w (raw: %q)", err, text)
 	}
 	return result.Tools, nil

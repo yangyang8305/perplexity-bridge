@@ -35,5 +35,9 @@ func Reload() {
 	ConfigInstance.IsMaxSubscribe = os.Getenv("IS_MAX_SUBSCRIBE") == "true"
 	ConfigInstance.Timezone = os.Getenv("TIMEZONE") // Fix #7
 	ConfigInstance.RwMutex.Unlock()
+	// #4 fix: reset round-robin index after session pool replacement
+	Sr.ResetIndex()
+	// #4 fix: rebuild ResponseModels so /v1/models reflects updated IsMaxSubscribe
+	buildResponseModels()
 	logger.Info(fmt.Sprintf("Config reloaded: sessions=%d", retryCount))
 }

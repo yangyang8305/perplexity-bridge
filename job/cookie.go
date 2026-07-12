@@ -61,7 +61,10 @@ func (su *SessionUpdater) loadSessionsFromFile() {
 	}
 	config.ConfigInstance.RwMutex.Lock()
 	config.ConfigInstance.Sessions = sessionConfig.Sessions
+	config.ConfigInstance.RetryCount = len(sessionConfig.Sessions)
 	config.ConfigInstance.RwMutex.Unlock()
+	// #3 fix: reset round-robin index after replacing session pool to avoid out-of-range index
+	config.Sr.ResetIndex()
 	log.Printf("Loaded %d sessions from config file", len(sessionConfig.Sessions))
 }
 
@@ -176,9 +179,9 @@ func (su *SessionUpdater) updateAllSessions() {
 	config.ConfigInstance.RwMutex.Lock()
 	config.ConfigInstance.Sessions = updatedSessions
 	config.ConfigInstance.RetryCount = len(updatedSessions)
-	// A9 fix: reset round-robin index after pool replacement to avoid out-of-range
-	config.Sr.ResetIndex()
 	config.ConfigInstance.RwMutex.Unlock()
+	// A9 fix + #3 fix: reset round-robin index AFTER releasing RwMutex to keep lock order consistent
+	config.Sr.ResetIndex()
 
 	if err := su.saveSessionsToFile(updatedSessions); err != nil {
 		log.Printf("Failed to save sessions: %v", err)

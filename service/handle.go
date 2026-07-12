@@ -42,7 +42,10 @@ func ChatCompletionsHandler(c *gin.Context) {
 	}
 
 	// Guard: refuse early if no sessions are configured (avoids panic in NextIndex / modulo-by-zero).
-	if len(config.ConfigInstance.Sessions) == 0 {
+	config.ConfigInstance.RwMutex.RLock()
+	sessionCount := len(config.ConfigInstance.Sessions)
+	config.ConfigInstance.RwMutex.RUnlock()
+	if sessionCount == 0 {
 		c.JSON(http.StatusServiceUnavailable, ErrorResponse{Error: "No SESSIONS configured"})
 		return
 	}
@@ -171,19 +174,36 @@ func ChatCompletionsHandler(c *gin.Context) {
 	// B1 fix: get starting index once; loop increments before use so index 0 is included
 	startIndex := config.Sr.NextIndex()
 	for i := 0; i < config.ConfigInstance.RetryCount; i++ {
+		// #1 fix: snapshot session count inside loop to guard against concurrent pool shrink
+		// (avoids integer divide-by-zero panic if Sessions becomes empty mid-request)
+		config.ConfigInstance.RwMutex.RLock()
+		currentCount := len(config.ConfigInstance.Sessions)
+		config.ConfigInstance.RwMutex.RUnlock()
+		if currentCount == 0 {
+			break
+		}
+
 		// Reset prompt to the original pre-upload version on every attempt
 		prompt.Reset()
 		prompt.WriteString(rootPromptStr)
 
 		// B1 fix: use (startIndex + i) % len so first attempt uses startIndex, not startIndex+1
-		index := (startIndex + i) % len(config.ConfigInstance.Sessions)
+		index := (startIndex + i) % currentCount
 		session, err := config.ConfigInstance.GetSessionForModel(index)
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to get session for model %s: %v", m, err))
 			continue
 		}
 		logger.Info(fmt.Sprintf("Using session index=%d model=%s", index, m))
-		pplxClient = core.NewClient(session.SessionKey, config.ConfigInstance.Proxy, m, openSearch)
+
+		config.ConfigInstance.RwMutex.RLock()
+		proxy := config.ConfigInstance.Proxy
+		isIncognito := config.ConfigInstance.IsIncognito
+		maxHistory := config.ConfigInstance.MaxChatHistoryLength
+		promptForFile := config.ConfigInstance.PromptForFile
+		config.ConfigInstance.RwMutex.RUnlock()
+
+		pplxClient = core.NewClient(session.SessionKey, proxy, m, openSearch)
 
 		if len(img_data_list) > 0 {
 			if err := pplxClient.UploadImage(img_data_list); err != nil {
@@ -191,13 +211,13 @@ func ChatCompletionsHandler(c *gin.Context) {
 				continue
 			}
 		}
-		if prompt.Len() > config.ConfigInstance.MaxChatHistoryLength {
+		if prompt.Len() > maxHistory {
 			if err := pplxClient.UploadText(prompt.String()); err != nil {
 				logger.Error(fmt.Sprintf("Failed to upload text: %v", err))
 				continue
 			}
 			prompt.Reset()
-			prompt.WriteString(config.ConfigInstance.PromptForFile)
+			prompt.WriteString(promptForFile)
 		}
 
 		if hasTools && !hasToolResults {
@@ -222,19 +242,19 @@ func ChatCompletionsHandler(c *gin.Context) {
 				model.ReturnRawToolCallsResponse(rawCalls, req.Stream, c)
 			} else {
 				logger.Info("No tool needed — answering directly")
-				if _, err := pplxClient.SendMessage(prompt.String(), req.Stream, config.ConfigInstance.IsIncognito, c); err != nil {
+				if _, err := pplxClient.SendMessage(prompt.String(), req.Stream, isIncognito, c); err != nil {
 					logger.Error(fmt.Sprintf("Failed to send message: %v", err))
 					continue
 				}
 			}
 		} else if hasTools && hasToolResults {
 			if req.Stream {
-				if statusCode, err := pplxClient.SendMessage(prompt.String(), true, config.ConfigInstance.IsIncognito, c); err != nil {
+				if statusCode, err := pplxClient.SendMessage(prompt.String(), true, isIncognito, c); err != nil {
 					logger.Error(fmt.Sprintf("Tool result stream failed: status=%d err=%v", statusCode, err))
 					continue
 				}
 			} else {
-				text, err := pplxClient.SendMessageCollect(prompt.String(), config.ConfigInstance.IsIncognito)
+				text, err := pplxClient.SendMessageCollect(prompt.String(), isIncognito)
 				if err != nil {
 					logger.Error(fmt.Sprintf("Tool result collect failed: %v", err))
 					continue
@@ -242,7 +262,7 @@ func ChatCompletionsHandler(c *gin.Context) {
 				model.ReturnOpenAIResponse(text, req.Stream, c)
 			}
 		} else {
-			if _, err := pplxClient.SendMessage(prompt.String(), req.Stream, config.ConfigInstance.IsIncognito, c); err != nil {
+			if _, err := pplxClient.SendMessage(prompt.String(), req.Stream, isIncognito, c); err != nil {
 				logger.Error(fmt.Sprintf("Failed to send message: %v", err))
 				continue
 			}
